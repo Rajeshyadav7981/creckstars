@@ -14,7 +14,7 @@ class RedisClient:
 
     async def connect(self):
         if self._pool is None:
-            url = REDIS_URL
+            url = REDIS_URL or ""
             kwargs = dict(
                 decode_responses=True,
                 max_connections=50,
@@ -23,11 +23,15 @@ class RedisClient:
                 retry_on_timeout=True,
                 health_check_interval=30,
             )
-            # Upstash/cloud Redis uses rediss:// (TLS) — skip cert verification
-            if url and url.startswith("rediss://"):
+            # Upstash/cloud Redis uses rediss:// (TLS)
+            if url.startswith("rediss://"):
+                import ssl as _ssl
+                ctx = _ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+                kwargs["connection_class"] = redis.connection.SSLConnection
+                kwargs["ssl_context"] = ctx
                 url = url.replace("rediss://", "redis://")
-                kwargs["ssl"] = True
-                kwargs["ssl_cert_reqs"] = None
             self._pool = redis.from_url(url, **kwargs)
         return self._pool
 
