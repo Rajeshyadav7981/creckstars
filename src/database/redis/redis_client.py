@@ -24,11 +24,7 @@ class RedisClient:
             )
             # Skip SSL cert verification for cloud Redis (Upstash, etc.)
             if REDIS_URL and REDIS_URL.startswith("rediss://"):
-                import ssl as _ssl
-                ctx = _ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = _ssl.CERT_NONE
-                kwargs["ssl"] = ctx
+                kwargs["ssl_cert_reqs"] = None
             self._pool = redis.from_url(REDIS_URL, **kwargs)
         return self._pool
 
