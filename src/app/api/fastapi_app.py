@@ -120,9 +120,14 @@ class CORSMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("[STARTUP] Lifespan starting...")
     # Schema managed via schema.sql — no migrations on startup
-    print("[DB] Connected")
-    validate_config()
+    try:
+        validate_config()
+        print("[CONFIG] Validated")
+    except Exception as e:
+        print(f"[CONFIG] FATAL: {e}")
+        raise
     # Start Redis Pub/Sub subscriber for WebSocket multi-instance support
     try:
         from src.services.websocket_service import ws_manager
