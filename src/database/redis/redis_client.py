@@ -14,8 +14,7 @@ class RedisClient:
 
     async def connect(self):
         if self._pool is None:
-            self._pool = redis.from_url(
-                REDIS_URL,
+            kwargs = dict(
                 decode_responses=True,
                 max_connections=50,
                 socket_timeout=3,
@@ -23,6 +22,9 @@ class RedisClient:
                 retry_on_timeout=True,
                 health_check_interval=30,
             )
+            if REDIS_URL and REDIS_URL.startswith("rediss://"):
+                kwargs["ssl_cert_reqs"] = "none"
+            self._pool = redis.from_url(REDIS_URL, **kwargs)
         return self._pool
 
     async def close(self):
