@@ -124,13 +124,24 @@ async def lifespan(app: FastAPI):
     print("[DB] Connected")
     validate_config()
     # Start Redis Pub/Sub subscriber for WebSocket multi-instance support
-    from src.services.websocket_service import ws_manager
-    await ws_manager.start_subscriber()
+    try:
+        from src.services.websocket_service import ws_manager
+        await ws_manager.start_subscriber()
+        print("[WS] Subscriber started")
+    except Exception as e:
+        print(f"[WS] Subscriber failed (non-fatal): {e}")
     # Start notification worker (Observer on same Redis event bus)
-    from src.services.notification_service import notification_worker
-    await notification_worker.start()
+    try:
+        from src.services.notification_service import notification_worker
+        await notification_worker.start()
+        print("[Notifications] Worker started")
+    except Exception as e:
+        print(f"[Notifications] Worker failed (non-fatal): {e}")
     yield
-    await notification_worker.stop()
+    try:
+        await notification_worker.stop()
+    except Exception:
+        pass
     await db.async_engine.dispose()
 
 
