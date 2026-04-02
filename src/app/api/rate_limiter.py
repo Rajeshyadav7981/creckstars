@@ -36,10 +36,7 @@ def _get_user_or_ip(request: Request) -> str:
 
 # Use Redis as storage backend so limits persist across restarts and workers
 _storage_uri = REDIS_URL if REDIS_URL else "memory://"
-_storage_options = {}
-if _storage_uri.startswith("rediss://"):
-    _storage_uri = _storage_uri.replace("rediss://", "redis://")
-    _storage_options = {"ssl": True, "ssl_cert_reqs": None}
+_storage_options = {"ssl_cert_reqs": "none"} if _storage_uri.startswith("rediss://") else {}
 limiter = Limiter(
     key_func=_get_user_or_ip,
     storage_uri=_storage_uri,
