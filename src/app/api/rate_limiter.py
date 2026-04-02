@@ -34,9 +34,23 @@ def _get_user_or_ip(request: Request) -> str:
     return _get_real_ip(request)
 
 
-# Use Redis as storage backend so limits persist across restarts and workers
+# Use Redis for rate limiting if available, fallback to in-memory
 _storage_uri = REDIS_URL if REDIS_URL else "memory://"
-_storage_options = {"ssl_cert_reqs": "none"} if _storage_uri.startswith("rediss://") else {}
+_storage_options = {}
+# Test Redis connectivity for rate limiter (sync client)
+if _storage_uri and _storage_uri.startswith("redis"):
+    try:
+        import redis as _sync_redis
+        _test = _sync_redis.from_url(_storage_uri, socket_timeout=2, ssl_cert_reqs=None)
+        _test.ping()
+        _test.close()
+        if _storage_uri.startswith("rediss://"):
+            _storage_options = {"ssl_cert_reqs": "none"}
+    except Exception:
+        print("[RATE LIMITER] Redis unavailable, using in-memory storage")
+        _storage_uri = "memory://"
+        _storage_options = {}
+
 limiter = Limiter(
     key_func=_get_user_or_ip,
     storage_uri=_storage_uri,
