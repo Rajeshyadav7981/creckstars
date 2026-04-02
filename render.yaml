@@ -1,0 +1,66 @@
+services:
+  - type: web
+    name: creckstars-api
+    runtime: python
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.app.api.fastapi_app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DB_HOST
+        value: ep-summer-truth-a1an3ul9.ap-southeast-1.aws.neon.tech
+      - key: DB_PORT
+        value: "5432"
+      - key: DB_USER
+        value: neondb_owner
+      - key: DB_PASSWORD
+        value: npg_tvwOI0LAWSC2
+      - key: DB_NAME
+        value: neondb
+      - key: DB_SSLMODE
+        value: require
+      - key: REDIS_URL
+        value: rediss://default:gQAAAAAAAWMAAAIncDE1NzE4Zjc1MDkwOGI0ZWZiODhhMDk2MmUzZDdiYWVmMXAxOTA4ODA@certain-vervet-90880.upstash.io:6379
+      - key: SECRET_KEY
+        value: creckstars-prod-secret-2024-change-this
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "15"
+      - key: REFRESH_TOKEN_EXPIRE_MINUTES
+        value: "10080"
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: ENVIRONMENT
+        value: production
+      - key: RATE_LIMIT_DEFAULT
+        value: 200/minute
+      - key: RATE_LIMIT_REGISTER
+        value: 5/minute
+      - key: RATE_LIMIT_LOGIN
+        value: 10/minute
+      - key: RATE_LIMIT_SCORE
+        value: 120/minute
+      - key: RATE_LIMIT_UNDO
+        value: 30/minute
+      - key: RATE_LIMIT_BROADCAST
+        value: 20/minute
+      - key: RATE_LIMIT_CREATE_POST
+        value: 30/minute
+      - key: RATE_LIMIT_LIST_POSTS
+        value: 60/minute
+      - key: RATE_LIMIT_LIKE
+        value: 60/minute
+      - key: RATE_LIMIT_COMMENT
+        value: 30/minute
+      - key: RATE_LIMIT_LIST_MATCHES
+        value: 60/minute
+      - key: RATE_LIMIT_LIST_TOURNAMENTS
+        value: 60/minute
+      - key: RATE_LIMIT_CREATE_TOURNAMENT
+        value: 10/minute
+      - key: RATE_LIMIT_CREATE_TEAM
+        value: 20/minute
+      - key: RATE_LIMIT_CREATE_MATCH
+        value: 20/minute
+      - key: RATE_LIMIT_CREATE_PLAYER
+        value: 30/minute
