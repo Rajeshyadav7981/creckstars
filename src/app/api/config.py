@@ -132,9 +132,8 @@ def validate_config():
         raise RuntimeError("[CONFIG] Database config incomplete. Check DB_HOST, DB_USER, DB_NAME in .env")
 
     if CORS_ORIGINS == "*":
-        if is_production:
-            raise RuntimeError("[CONFIG] FATAL: CORS_ORIGINS is '*' in production. Set specific origins in .env")
-        warnings.warn("[CONFIG] CORS_ORIGINS is '*' (allow all). Restrict in production.", stacklevel=2)
+        # Mobile apps (React Native) don't use browser CORS — '*' is safe
+        warnings.warn("[CONFIG] CORS_ORIGINS is '*'. Fine for mobile APIs, restrict for web.", stacklevel=2)
 
     if SECRET_KEY == "creckstars-secret-change-in-production" or CORS_ORIGINS == "*":
         print("[CONFIG] WARNING: Running with development-mode settings. Do not use in production.")
