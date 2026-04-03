@@ -123,6 +123,7 @@ class UndoService:
                 "current_non_striker_id": state.get("non_striker_id"),
                 "current_bowler_id": state.get("bowler_id"),
                 "is_free_hit": state.get("is_free_hit", False),
+                "status": "in_progress",  # Always revert to in_progress on undo
             })
         else:
             # First ball undone - reset innings to initial state
@@ -132,6 +133,16 @@ class UndoService:
                 "total_overs": 0.0,
                 "current_ball": 0,
                 "is_free_hit": False,
+                "status": "in_progress",
+            })
+
+        # Also revert match status if it was auto-completed
+        if match.status == "completed":
+            await MatchRepository.update(session, match_id, {
+                "status": "live",
+                "winner_id": None,
+                "result_summary": None,
+                "result_type": None,
             })
 
         # Store undo event
