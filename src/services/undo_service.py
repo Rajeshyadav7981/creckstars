@@ -12,8 +12,8 @@ class UndoService:
     @staticmethod
     async def undo_last_ball(session: AsyncSession, match_id: int, user_id: int):
         match = await MatchRepository.get_by_id(session, match_id)
-        if not match or match.status != "live":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
+        if not match or match.status not in ("live", "completed"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not in progress")
 
         # Get last delivery event (skip undo, end_over, innings_end events)
         from sqlalchemy import select, desc
@@ -40,11 +40,23 @@ class UndoService:
         if delivery_id:
             delivery = await DeliveryRepository.get_by_id(session, delivery_id)
 
-        # Revert scorecard entries using the delivery data
-        innings_list = await InningsRepository.get_by_match(session, match_id, match.current_innings)
-        if not innings_list:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No active innings")
-        innings = innings_list[0]
+        # Find the innings this delivery belongs to
+        if delivery:
+            from src.database.postgres.schemas.innings_schema import InningsSchema
+            inn_result = await session.execute(
+                select(InningsSchema).where(InningsSchema.id == delivery.innings_id)
+            )
+            innings = inn_result.scalar_one_or_none()
+        else:
+            innings_list = await InningsRepository.get_by_match(session, match_id, match.current_innings)
+            innings = innings_list[0] if innings_list else None
+
+        if not innings:
+            # Fallback: get latest innings
+            all_inn = await InningsRepository.get_by_match(session, match_id)
+            innings = all_inn[-1] if all_inn else None
+        if not innings:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No innings found")
 
         if delivery:
             # Revert batting scorecard
