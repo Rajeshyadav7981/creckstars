@@ -15,9 +15,21 @@ class UndoService:
         if not match or match.status != "live":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
 
-        # Get last event
-        last_event = await MatchEventRepository.get_last_event(session, match_id)
-        if not last_event or last_event.event_type != "delivery":
+        # Get last delivery event (skip undo, end_over, innings_end events)
+        from sqlalchemy import select, desc
+        from src.database.postgres.schemas.match_event_schema import MatchEventSchema
+        result = await session.execute(
+            select(MatchEventSchema)
+            .where(
+                MatchEventSchema.match_id == match_id,
+                MatchEventSchema.event_type == "delivery",
+                MatchEventSchema.is_undone == False,
+            )
+            .order_by(desc(MatchEventSchema.sequence_number))
+            .limit(1)
+        )
+        last_event = result.scalar_one_or_none()
+        if not last_event:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No delivery to undo")
 
         event_data = last_event.event_data or {}
@@ -101,15 +113,37 @@ class UndoService:
                 # Reactivate old partnership, deactivate new one
                 await ScorecardRepository.revert_partnership_for_wicket(session, innings.id)
 
-        # Mark event as undone
+        # Mark delivery event as undone
         await MatchEventRepository.mark_undone(session, last_event.id)
+
+        # Also mark any end_over/undo events AFTER this delivery as undone
+        later_events = await session.execute(
+            select(MatchEventSchema)
+            .where(
+                MatchEventSchema.match_id == match_id,
+                MatchEventSchema.sequence_number > last_event.sequence_number,
+                MatchEventSchema.is_undone == False,
+            )
+        )
+        for evt in later_events.scalars().all():
+            evt.is_undone = True
 
         # Delete the delivery
         if delivery_id:
             await DeliveryRepository.delete(session, delivery_id)
 
-        # Get the event before this one to restore state
-        prev_event = await MatchEventRepository.get_last_event(session, match_id)
+        # Get the previous delivery event to restore state
+        prev_result = await session.execute(
+            select(MatchEventSchema)
+            .where(
+                MatchEventSchema.match_id == match_id,
+                MatchEventSchema.event_type == "delivery",
+                MatchEventSchema.is_undone == False,
+            )
+            .order_by(desc(MatchEventSchema.sequence_number))
+            .limit(1)
+        )
+        prev_event = prev_result.scalar_one_or_none()
 
         if prev_event and prev_event.match_state:
             state = prev_event.match_state
