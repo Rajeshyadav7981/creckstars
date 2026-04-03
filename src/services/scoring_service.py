@@ -442,6 +442,13 @@ class ScoringService:
                 detail="Innings already completed"
             )
 
+        # Guard: Same bowler cannot bowl consecutive overs
+        if innings.current_bowler_id == next_bowler_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Same bowler cannot bowl consecutive overs"
+            )
+
         # Calculate the correct new over from total_overs (more reliable than current_over)
         new_over = int(innings.total_overs) if innings.total_overs else innings.current_over + 1
 
