@@ -488,8 +488,24 @@ class ScoringService:
         if not match or match.status != "live":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
 
-        innings_list = await InningsRepository.get_by_match(session, match_id, match.current_innings)
-        innings = innings_list[0]
+        # Find the current active innings
+        current_inn = match.current_innings
+        if not current_inn:
+            # Find the latest non-completed innings
+            all_innings = await InningsRepository.get_by_match(session, match_id)
+            active = [i for i in all_innings if i.status != "completed"]
+            if not active:
+                return {"message": "All innings already completed", "total_runs": 0}
+            innings = active[0]
+        else:
+            innings_list = await InningsRepository.get_by_match(session, match_id, current_inn)
+            if not innings_list:
+                return {"message": "No innings found", "total_runs": 0}
+            innings = innings_list[0]
+
+        # Skip if already completed
+        if innings.status == "completed":
+            return {"message": f"Innings {innings.innings_number} already completed", "total_runs": innings.total_runs}
 
         # Mark current batsmen as "not out"
         batting_cards = await ScorecardRepository.get_batting_by_innings(session, innings.id)
@@ -499,7 +515,6 @@ class ScoringService:
         await session.flush()
 
         await InningsRepository.update(session, innings.id, {"status": "completed"})
-
         await session.commit()
 
         logger.info(f"Innings ended: match={match_id}")
