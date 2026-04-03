@@ -1,6 +1,7 @@
 import random
 import string
 from fastapi import HTTPException, status
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.repositories.tournament_repository import TournamentRepository
 from src.database.postgres.repositories.team_repository import TeamRepository
@@ -371,8 +372,48 @@ class TournamentService:
         # Sort by wickets desc (Purple Cap)
         bowlers_list.sort(key=lambda x: x["wickets"], reverse=True)
 
+        # Aggregate fielding stats (catches, run outs, stumpings)
+        from src.database.postgres.schemas.delivery_schema import DeliverySchema
+        from src.database.postgres.schemas.innings_schema import InningsSchema
+        from src.database.postgres.schemas.match_schema import MatchSchema
+        from src.database.postgres.schemas.player_schema import PlayerSchema
+        fielding_rows = await session.execute(
+            select(
+                DeliverySchema.fielder_id,
+                PlayerSchema.full_name,
+                DeliverySchema.wicket_type,
+                func.count().label('cnt'),
+            )
+            .join(InningsSchema, DeliverySchema.innings_id == InningsSchema.id)
+            .join(MatchSchema, InningsSchema.match_id == MatchSchema.id)
+            .join(PlayerSchema, DeliverySchema.fielder_id == PlayerSchema.id)
+            .where(
+                MatchSchema.tournament_id == tournament_id,
+                DeliverySchema.is_wicket == True,
+                DeliverySchema.fielder_id.isnot(None),
+            )
+            .group_by(DeliverySchema.fielder_id, PlayerSchema.full_name, DeliverySchema.wicket_type)
+        )
+        fielders = {}
+        for row in fielding_rows.all():
+            pid = row.fielder_id
+            if pid not in fielders:
+                fielders[pid] = {"player_id": pid, "name": row.full_name, "catches": 0, "run_outs": 0, "stumpings": 0}
+            wt = row.wicket_type
+            if wt == 'caught':
+                fielders[pid]["catches"] += row.cnt
+            elif wt == 'run_out':
+                fielders[pid]["run_outs"] += row.cnt
+            elif wt == 'stumped':
+                fielders[pid]["stumpings"] += row.cnt
+        fielders_list = list(fielders.values())
+        for f in fielders_list:
+            f["total"] = f["catches"] + f["run_outs"] + f["stumpings"]
+        fielders_list.sort(key=lambda x: x["total"], reverse=True)
+
         return {
             "top_batsmen": batsmen_list[:20],
             "top_bowlers": bowlers_list[:20],
+            "top_fielders": fielders_list[:20],
             "highest_scores": highest_scores[:20],
         }
