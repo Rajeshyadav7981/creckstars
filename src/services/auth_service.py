@@ -173,7 +173,7 @@ class AuthService:
             }})
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials",
+                detail="No account found with this mobile number",
             )
 
         if not verify_password(password, user.password):
@@ -182,7 +182,7 @@ class AuthService:
             }})
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid password",
+                detail="Invalid password. Please try again.",
             )
 
         # Auto-rehash legacy SHA-256 passwords to bcrypt on successful login
