@@ -21,7 +21,8 @@ async def _check_match_owner(session, match_id: int, user_id: int):
     match = await MatchRepository.get_by_id(session, match_id)
     if not match:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
-    if match.created_by != user_id:
+    # Allow match creator or designated scorer
+    if match.created_by != user_id and getattr(match, 'scorer_user_id', None) != user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the match creator can score")
     return match
 
