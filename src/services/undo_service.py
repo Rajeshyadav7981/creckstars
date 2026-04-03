@@ -123,7 +123,7 @@ class UndoService:
                 "current_non_striker_id": state.get("non_striker_id"),
                 "current_bowler_id": state.get("bowler_id"),
                 "is_free_hit": state.get("is_free_hit", False),
-                "status": "in_progress",  # Always revert to in_progress on undo
+                "status": "in_progress",
             })
         else:
             # First ball undone - reset innings to initial state
