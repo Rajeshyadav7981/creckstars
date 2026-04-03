@@ -14,3 +14,4 @@ bcrypt==4.2.1
 slowapi==0.1.9
 orjson
 python-dotenv==1.0.1
+Pillow==10.2.0
