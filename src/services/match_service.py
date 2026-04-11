@@ -46,11 +46,15 @@ class MatchService:
     @staticmethod
     async def get_matches(
         session: AsyncSession, status_filter: str = None, tournament_id: int = None,
-        search: str = None, created_by: int = None, limit: int = 50, offset: int = 0,
+        search: str = None, created_by: int = None, stage_id: int = None,
+        for_user: int = None,
+        limit: int = 50, offset: int = 0,
     ):
         return await MatchRepository.get_all(
             session, status=status_filter, tournament_id=tournament_id,
-            search=search, created_by=created_by, limit=limit, offset=offset,
+            search=search, created_by=created_by, stage_id=stage_id,
+            for_user=for_user,
+            limit=limit, offset=offset,
         )
 
     @staticmethod

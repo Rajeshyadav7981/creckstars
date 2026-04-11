@@ -32,8 +32,20 @@ class PostRepository:
         )
         if sort == "top":
             query = query.order_by(PostSchema.likes_count.desc(), PostSchema.id.desc())
+        elif sort == "hot":
+            # Hot score = likes / (hours_since_post + 2) ^ 1.5 — moved to SQL
+            # so Postgres can ORDER BY + LIMIT in one pass instead of fetching
+            # everything and re-sorting in Python.
+            from sqlalchemy import func
+            hot_score = (
+                func.coalesce(PostSchema.likes_count, 0) /
+                func.power(
+                    (func.extract('epoch', func.now() - PostSchema.created_at) / 3600.0) + 2.0,
+                    1.5,
+                )
+            )
+            query = query.order_by(hot_score.desc(), PostSchema.id.desc())
         else:
-            # "new" and "hot" both fetch by created_at; hot is re-sorted in Python
             query = query.order_by(PostSchema.created_at.desc(), PostSchema.id.desc())
 
         # Cursor-based pagination (id tie-breaking prevents duplicates/skips)

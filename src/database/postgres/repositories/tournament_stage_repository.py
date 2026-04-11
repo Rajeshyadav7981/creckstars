@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.schemas.tournament_stage_schema import TournamentStageSchema
 from src.database.postgres.schemas.tournament_group_schema import TournamentGroupSchema
@@ -80,6 +80,29 @@ class TournamentStageRepository:
             gt.qualification_status = status
             await session.flush()
         return gt
+
+    @staticmethod
+    async def bulk_update_team_status(session, pairs_by_status):
+        """Apply qualification status to many (group_id, team_id) pairs at once.
+
+        `pairs_by_status` is `{status: [(group_id, team_id), ...]}`. Each
+        status value gets ONE UPDATE statement using a (group_id, team_id) IN
+        tuple — replaces N×2 SELECT+UPDATE round-trips with at most one query
+        per distinct status value (typically 2: "qualified" and "eliminated").
+        """
+        for status, pairs in pairs_by_status.items():
+            if not pairs:
+                continue
+            await session.execute(
+                sa_update(TournamentGroupTeamSchema)
+                .where(
+                    tuple_(
+                        TournamentGroupTeamSchema.group_id,
+                        TournamentGroupTeamSchema.team_id,
+                    ).in_(pairs)
+                )
+                .values(qualification_status=status)
+            )
 
     @staticmethod
     async def remove_team_from_group(session, group_id, team_id):

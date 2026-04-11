@@ -36,11 +36,12 @@ class TournamentService:
     @staticmethod
     async def get_tournaments(
         session: AsyncSession, status_filter: str = None, created_by: int = None,
-        search: str = None, limit: int = 50, offset: int = 0,
+        search: str = None, for_user: int = None,
+        limit: int = 50, offset: int = 0,
     ):
         return await TournamentRepository.get_all(
             session, status=status_filter, created_by=created_by,
-            search=search, limit=limit, offset=offset,
+            search=search, for_user=for_user, limit=limit, offset=offset,
         )
 
     @staticmethod
@@ -252,137 +253,99 @@ class TournamentService:
         if not tournament:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tournament not found")
 
-        batting_rows = await MatchRepository.get_batting_scorecards_by_tournament(session, tournament_id)
-        bowling_rows = await MatchRepository.get_bowling_scorecards_by_tournament(session, tournament_id)
+        # Pull all aggregates from Postgres in 4 cheap GROUP BY / ORDER BY
+        # queries instead of fetching every scorecard row and looping in
+        # Python. Same output shape — pure perf change.
+        bat_aggs = await MatchRepository.get_batting_aggregates_by_tournament(session, tournament_id)
+        top_innings = await MatchRepository.get_top_batting_innings_by_tournament(session, tournament_id, limit=20)
+        bowl_aggs = await MatchRepository.get_bowling_aggregates_by_tournament(session, tournament_id)
+        best_figures = await MatchRepository.get_best_bowling_figures_by_tournament(session, tournament_id)
 
-        # Aggregate batting stats per player
-        batsmen = {}
-        highest_scores = []
-        for bat_card, player, innings in batting_rows:
-            pid = player.id
-            if pid not in batsmen:
-                batsmen[pid] = {
-                    "player_id": pid,
-                    "player_name": player.full_name,
-                    "matches": set(),
-                    "total_runs": 0,
-                    "total_balls": 0,
-                    "total_fours": 0,
-                    "total_sixes": 0,
-                    "highest_score": 0,
-                    "innings_played": 0,
-                }
-            batsmen[pid]["matches"].add(innings.match_id)
-            batsmen[pid]["total_runs"] += bat_card.runs or 0
-            batsmen[pid]["total_balls"] += bat_card.balls_faced or 0
-            batsmen[pid]["total_fours"] += bat_card.fours or 0
-            batsmen[pid]["total_sixes"] += bat_card.sixes or 0
-            batsmen[pid]["innings_played"] += 1
-            if (bat_card.runs or 0) > batsmen[pid]["highest_score"]:
-                batsmen[pid]["highest_score"] = bat_card.runs or 0
-
-            # Track individual high scores
-            highest_scores.append({
-                "player_id": pid,
-                "player_name": player.full_name,
-                "runs": bat_card.runs or 0,
-                "balls_faced": bat_card.balls_faced or 0,
-                "fours": bat_card.fours or 0,
-                "sixes": bat_card.sixes or 0,
-                "match_id": innings.match_id,
-            })
-
-        # Finalize batsmen stats
+        # Batting list — already sorted by total runs desc in SQL
         batsmen_list = []
-        for b in batsmen.values():
-            avg = round(b["total_runs"] / b["innings_played"], 2) if b["innings_played"] > 0 else 0.0
-            sr = round((b["total_runs"] / b["total_balls"]) * 100, 2) if b["total_balls"] > 0 else 0.0
+        for r in bat_aggs:
+            innings = int(r.innings or 0)
+            runs = int(r.total_runs or 0)
+            balls = int(r.total_balls or 0)
+            avg = round(runs / innings, 2) if innings > 0 else 0.0
+            sr = round((runs / balls) * 100, 2) if balls > 0 else 0.0
             batsmen_list.append({
-                "player_id": b["player_id"],
-                "player_name": b["player_name"],
-                "matches": len(b["matches"]),
-                "innings": b["innings_played"],
-                "runs": b["total_runs"],
-                "balls_faced": b["total_balls"],
-                "fours": b["total_fours"],
-                "sixes": b["total_sixes"],
-                "highest_score": b["highest_score"],
+                "player_id": r.player_id,
+                "player_name": r.full_name,
+                "matches": int(r.matches or 0),
+                "innings": innings,
+                "runs": runs,
+                "balls_faced": balls,
+                "fours": int(r.total_fours or 0),
+                "sixes": int(r.total_sixes or 0),
+                "highest_score": int(r.highest_score or 0),
                 "average": avg,
                 "strike_rate": sr,
             })
 
-        # Sort by runs desc (Orange Cap)
-        batsmen_list.sort(key=lambda x: x["runs"], reverse=True)
+        # Top individual innings — already sorted + limited in SQL
+        highest_scores = [{
+            "player_id": r.player_id,
+            "player_name": r.full_name,
+            "runs": int(r.runs or 0),
+            "balls_faced": int(r.balls_faced or 0),
+            "fours": int(r.fours or 0),
+            "sixes": int(r.sixes or 0),
+            "match_id": r.match_id,
+        } for r in top_innings]
 
-        # Sort highest individual scores
-        highest_scores.sort(key=lambda x: x["runs"], reverse=True)
+        # Index best bowling figures by player_id for the join below
+        best_by_player = {
+            r.player_id: (int(r.wickets or 0), int(r.runs_conceded or 0))
+            for r in best_figures
+        }
 
-        # Aggregate bowling stats per player
-        bowlers = {}
-        for bowl_card, player, innings in bowling_rows:
-            pid = player.id
-            if pid not in bowlers:
-                bowlers[pid] = {
-                    "player_id": pid,
-                    "player_name": player.full_name,
-                    "matches": set(),
-                    "total_wickets": 0,
-                    "total_runs_conceded": 0,
-                    "total_overs": 0.0,
-                    "total_maidens": 0,
-                    "total_dot_balls": 0,
-                    "innings_bowled": 0,
-                    "best_wickets": 0,
-                    "best_runs": 0,
-                }
-            bowlers[pid]["matches"].add(innings.match_id)
-            bowlers[pid]["total_wickets"] += bowl_card.wickets or 0
-            bowlers[pid]["total_runs_conceded"] += bowl_card.runs_conceded or 0
-            bowlers[pid]["total_overs"] += bowl_card.overs_bowled or 0.0
-            bowlers[pid]["total_maidens"] += bowl_card.maidens or 0
-            bowlers[pid]["total_dot_balls"] += bowl_card.dot_balls or 0
-            bowlers[pid]["innings_bowled"] += 1
-
-            w = bowl_card.wickets or 0
-            r = bowl_card.runs_conceded or 0
-            if w > bowlers[pid]["best_wickets"] or (w == bowlers[pid]["best_wickets"] and r < bowlers[pid]["best_runs"]):
-                bowlers[pid]["best_wickets"] = w
-                bowlers[pid]["best_runs"] = r
-
-        # Finalize bowlers stats
+        # Bowling list — already sorted by wickets desc in SQL
         bowlers_list = []
-        for b in bowlers.values():
-            economy = round(b["total_runs_conceded"] / b["total_overs"], 2) if b["total_overs"] > 0 else 0.0
-            avg = round(b["total_runs_conceded"] / b["total_wickets"], 2) if b["total_wickets"] > 0 else 0.0
+        for r in bowl_aggs:
+            wickets = int(r.total_wickets or 0)
+            runs = int(r.total_runs_conceded or 0)
+            overs = float(r.total_overs or 0.0)
+            economy = round(runs / overs, 2) if overs > 0 else 0.0
+            avg = round(runs / wickets, 2) if wickets > 0 else 0.0
+            best_w, best_r = best_by_player.get(r.player_id, (0, 0))
             bowlers_list.append({
-                "player_id": b["player_id"],
-                "player_name": b["player_name"],
-                "matches": len(b["matches"]),
-                "innings": b["innings_bowled"],
-                "wickets": b["total_wickets"],
-                "runs_conceded": b["total_runs_conceded"],
-                "overs": b["total_overs"],
-                "maidens": b["total_maidens"],
-                "dot_balls": b["total_dot_balls"],
+                "player_id": r.player_id,
+                "player_name": r.full_name,
+                "matches": int(r.matches or 0),
+                "innings": int(r.innings or 0),
+                "wickets": wickets,
+                "runs_conceded": runs,
+                "overs": overs,
+                "maidens": int(r.total_maidens or 0),
+                "dot_balls": int(r.total_dot_balls or 0),
                 "economy": economy,
                 "average": avg,
-                "best": f"{b['best_wickets']}/{b['best_runs']}",
+                "best": f"{best_w}/{best_r}",
             })
 
-        # Sort by wickets desc (Purple Cap)
-        bowlers_list.sort(key=lambda x: x["wickets"], reverse=True)
-
-        # Aggregate fielding stats (catches, run outs, stumpings)
+        # Aggregate fielding stats (catches, run outs, stumpings) — single
+        # GROUP BY query with conditional SUMs and ORDER BY total desc.
+        # Replaces the per-row dict-merge loop + Python sort.
+        from sqlalchemy import case
         from src.database.postgres.schemas.delivery_schema import DeliverySchema
         from src.database.postgres.schemas.innings_schema import InningsSchema
         from src.database.postgres.schemas.match_schema import MatchSchema
         from src.database.postgres.schemas.player_schema import PlayerSchema
+
+        catches_expr = func.sum(case((DeliverySchema.wicket_type == 'caught', 1), else_=0))
+        run_outs_expr = func.sum(case((DeliverySchema.wicket_type == 'run_out', 1), else_=0))
+        stumpings_expr = func.sum(case((DeliverySchema.wicket_type == 'stumped', 1), else_=0))
+        total_expr = catches_expr + run_outs_expr + stumpings_expr
+
         fielding_rows = await session.execute(
             select(
-                DeliverySchema.fielder_id,
-                PlayerSchema.full_name,
-                DeliverySchema.wicket_type,
-                func.count().label('cnt'),
+                DeliverySchema.fielder_id.label("player_id"),
+                PlayerSchema.full_name.label("name"),
+                catches_expr.label("catches"),
+                run_outs_expr.label("run_outs"),
+                stumpings_expr.label("stumpings"),
+                total_expr.label("total"),
             )
             .join(InningsSchema, DeliverySchema.innings_id == InningsSchema.id)
             .join(MatchSchema, InningsSchema.match_id == MatchSchema.id)
@@ -392,24 +355,17 @@ class TournamentService:
                 DeliverySchema.is_wicket == True,
                 DeliverySchema.fielder_id.isnot(None),
             )
-            .group_by(DeliverySchema.fielder_id, PlayerSchema.full_name, DeliverySchema.wicket_type)
+            .group_by(DeliverySchema.fielder_id, PlayerSchema.full_name)
+            .order_by(total_expr.desc())
         )
-        fielders = {}
-        for row in fielding_rows.all():
-            pid = row.fielder_id
-            if pid not in fielders:
-                fielders[pid] = {"player_id": pid, "name": row.full_name, "catches": 0, "run_outs": 0, "stumpings": 0}
-            wt = row.wicket_type
-            if wt == 'caught':
-                fielders[pid]["catches"] += row.cnt
-            elif wt == 'run_out':
-                fielders[pid]["run_outs"] += row.cnt
-            elif wt == 'stumped':
-                fielders[pid]["stumpings"] += row.cnt
-        fielders_list = list(fielders.values())
-        for f in fielders_list:
-            f["total"] = f["catches"] + f["run_outs"] + f["stumpings"]
-        fielders_list.sort(key=lambda x: x["total"], reverse=True)
+        fielders_list = [{
+            "player_id": r.player_id,
+            "name": r.name,
+            "catches": int(r.catches or 0),
+            "run_outs": int(r.run_outs or 0),
+            "stumpings": int(r.stumpings or 0),
+            "total": int(r.total or 0),
+        } for r in fielding_rows.all()]
 
         return {
             "top_batsmen": batsmen_list[:20],

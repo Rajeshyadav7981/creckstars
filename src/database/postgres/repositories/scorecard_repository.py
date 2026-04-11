@@ -32,6 +32,20 @@ class ScorecardRepository:
         return result.scalars().all()
 
     @staticmethod
+    async def get_batting_for_innings_ids(session: AsyncSession, innings_ids: list) -> list:
+        """Bulk-load batting cards for many innings in one query.
+        Replaces N per-innings calls when serializing a full match scorecard.
+        """
+        if not innings_ids:
+            return []
+        result = await session.execute(
+            select(BattingScorecardSchema)
+            .where(BattingScorecardSchema.innings_id.in_(innings_ids))
+            .order_by(BattingScorecardSchema.innings_id, BattingScorecardSchema.batting_position)
+        )
+        return result.scalars().all()
+
+    @staticmethod
     async def update_batting(session: AsyncSession, card: BattingScorecardSchema, data: dict):
         for key, value in data.items():
             setattr(card, key, value)
@@ -60,6 +74,17 @@ class ScorecardRepository:
         )
         return result.scalars().all()
 
+    @staticmethod
+    async def get_bowling_for_innings_ids(session: AsyncSession, innings_ids: list) -> list:
+        if not innings_ids:
+            return []
+        result = await session.execute(
+            select(BowlingScorecardSchema)
+            .where(BowlingScorecardSchema.innings_id.in_(innings_ids))
+            .order_by(BowlingScorecardSchema.innings_id, BowlingScorecardSchema.id)
+        )
+        return result.scalars().all()
+
     # --- Fall of Wickets ---
     @staticmethod
     async def add_fall_of_wicket(session: AsyncSession, data: dict) -> FallOfWicketSchema:
@@ -74,6 +99,17 @@ class ScorecardRepository:
             select(FallOfWicketSchema)
             .where(FallOfWicketSchema.innings_id == innings_id)
             .order_by(FallOfWicketSchema.wicket_number)
+        )
+        return result.scalars().all()
+
+    @staticmethod
+    async def get_fall_of_wickets_for_innings_ids(session: AsyncSession, innings_ids: list) -> list:
+        if not innings_ids:
+            return []
+        result = await session.execute(
+            select(FallOfWicketSchema)
+            .where(FallOfWicketSchema.innings_id.in_(innings_ids))
+            .order_by(FallOfWicketSchema.innings_id, FallOfWicketSchema.wicket_number)
         )
         return result.scalars().all()
 
@@ -108,6 +144,17 @@ class ScorecardRepository:
             select(PartnershipSchema)
             .where(PartnershipSchema.innings_id == innings_id)
             .order_by(PartnershipSchema.wicket_number)
+        )
+        return result.scalars().all()
+
+    @staticmethod
+    async def get_partnerships_for_innings_ids(session: AsyncSession, innings_ids: list) -> list:
+        if not innings_ids:
+            return []
+        result = await session.execute(
+            select(PartnershipSchema)
+            .where(PartnershipSchema.innings_id.in_(innings_ids))
+            .order_by(PartnershipSchema.innings_id, PartnershipSchema.wicket_number)
         )
         return result.scalars().all()
 

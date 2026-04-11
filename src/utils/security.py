@@ -12,6 +12,7 @@ from src.database.postgres.db import get_async_db
 from src.database.postgres.repositories.user_repository import UserRepository
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -129,3 +130,17 @@ async def get_current_user(
         pass
 
     return user
+
+
+async def get_current_user_optional(
+    token: str | None = Depends(oauth2_scheme_optional),
+    session: AsyncSession = Depends(get_async_db),
+):
+    """Like get_current_user, but returns None if no token or invalid token.
+    Use for public endpoints that personalize output when signed in."""
+    if not token:
+        return None
+    try:
+        return await get_current_user(token=token, session=session)
+    except HTTPException:
+        return None

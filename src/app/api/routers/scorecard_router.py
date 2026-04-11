@@ -2,7 +2,7 @@ import asyncio
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
-from src.utils.security import get_current_user
+from src.utils.security import get_current_user_optional
 from src.services.scorecard_service import ScorecardService
 from src.database.redis.match_cache import MatchCache
 
@@ -21,7 +21,7 @@ def _get_lock(key: str) -> asyncio.Lock:
 async def get_scorecard(
     match_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     cached = await MatchCache.get_scorecard(match_id)
     if cached:
@@ -47,7 +47,7 @@ async def get_scorecard(
 async def get_live_state(
     match_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     cached = await MatchCache.get_live_state(match_id)
     if cached:
@@ -74,7 +74,7 @@ async def get_commentary(
     limit: int = Query(20),
     offset: int = Query(0),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     # Cache commentary too (30s TTL)
     cache_key = f"comm:{match_id}:{innings_number}:{limit}:{offset}"

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from starlette.requests import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
-from src.utils.security import get_current_user
+from src.utils.security import get_current_user, get_current_user_optional
 from src.services.community_service import CommunityService
 from src.database.postgres.repositories.post_repository import PostRepository
 from src.app.api.routers.models.community_model import (
@@ -40,9 +40,10 @@ async def list_posts(
     sort: str = Query("hot", regex="^(hot|new|top)$"),
     cursor: str = Query(None, description="ISO timestamp cursor for keyset pagination"),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
-    return await CommunityService.list_posts(session, user.id, limit=limit, offset=offset, sort=sort, cursor=cursor)
+    uid = user.id if user else None
+    return await CommunityService.list_posts(session, uid, limit=limit, offset=offset, sort=sort, cursor=cursor)
 
 
 @router.put("/posts/{post_id}")
@@ -137,11 +138,11 @@ async def get_comments(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     return await CommunityService.get_comments(
         session, post_id, limit=limit, offset=offset,
-        max_depth=max_depth, parent_id=parent_id, user_id=user.id,
+        max_depth=max_depth, parent_id=parent_id, user_id=(user.id if user else None),
     )
 
 
@@ -162,9 +163,9 @@ async def list_polls(
     limit: int = Query(10, ge=1, le=20),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
-    return await CommunityService.list_polls(session, user.id, limit=limit, offset=offset)
+    return await CommunityService.list_polls(session, (user.id if user else None), limit=limit, offset=offset)
 
 
 @router.post("/polls/{poll_id}/vote")
@@ -183,7 +184,7 @@ async def vote_poll(
 async def trending_hashtags(
     limit: int = Query(10, ge=1, le=20),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Get trending hashtags by post count."""
     from src.database.postgres.schemas.post_schema import HashtagSchema
@@ -211,7 +212,7 @@ async def search_hashtags(
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=20),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Search hashtags by prefix (for autocomplete)."""
     from src.database.postgres.schemas.post_schema import HashtagSchema
@@ -232,7 +233,7 @@ async def hashtag_posts(
     limit: int = Query(20, ge=1, le=50),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Get posts tagged with a specific hashtag."""
     from src.database.postgres.schemas.post_schema import PostSchema, PostHashtagSchema, HashtagSchema, PostLikeSchema
@@ -251,7 +252,7 @@ async def hashtag_posts(
     rows = result.all()
     post_ids = [r[0].id for r in rows]
     liked_ids = set()
-    if post_ids:
+    if post_ids and user:
         liked_result = await session.execute(
             select(PostLikeSchema.post_id).where(
                 PostLikeSchema.post_id.in_(post_ids), PostLikeSchema.user_id == user.id,

@@ -176,6 +176,24 @@ app.add_middleware(RequestTracingMiddleware)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
+# Global exception handler — logs traceback + returns error detail for debugging
+import traceback as _tb
+from fastapi.responses import JSONResponse as _JSONResp
+from src.utils.logger import get_logger as _get_logger
+_err_logger = _get_logger("unhandled")
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request, exc):
+    tb_str = _tb.format_exc()
+    _err_logger.error(f"Unhandled {type(exc).__name__} on {request.method} {request.url.path}: {exc}\n{tb_str}")
+    return _JSONResp(
+        status_code=500,
+        content={
+            "detail": f"{type(exc).__name__}: {str(exc)}",
+            "path": str(request.url.path),
+        },
+    )
+
 app.include_router(main_router)
 
 # Serve uploaded files
@@ -192,9 +210,17 @@ def root():
     return {"message": "CreckStars API is running"}
 
 
+_health_cache = {"data": None, "ts": 0}
+
 @app.get("/health")
 async def health():
-    """Health check for load balancers and monitoring."""
+    """Health check for load balancers and monitoring.
+    Cached for 3s to avoid DB+Redis pings on every poll cycle."""
+    import time as _t
+    now = _t.time()
+    if _health_cache["data"] and now - _health_cache["ts"] < 3:
+        return _health_cache["data"]
+
     db_ok = False
     redis_ok = False
     try:
@@ -213,7 +239,6 @@ async def health():
     except Exception:
         pass
 
-    # WebSocket connection stats
     ws_stats = {}
     try:
         from src.services.websocket_service import ws_manager
@@ -225,4 +250,7 @@ async def health():
         pass
 
     health_status = "ok" if db_ok and redis_ok else "degraded"
-    return {"status": health_status, "db": db_ok, "redis": redis_ok, "websocket": ws_stats}
+    result = {"status": health_status, "db": db_ok, "redis": redis_ok, "websocket": ws_stats}
+    _health_cache["data"] = result
+    _health_cache["ts"] = now
+    return result

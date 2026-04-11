@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 class CreateTournamentRequest(BaseModel):
     name: str
-    tournament_type: str = "league"
+    tournament_type: str = "league_knockout"
     overs_per_match: int = 20
     ball_type: str | None = "tennis"
     start_date: date | None = None
@@ -64,11 +64,6 @@ class UpdateTournamentRequest(BaseModel):
 
 class QualificationRuleRequest(BaseModel):
     top_n: int = 2
-
-
-class AddTeamToStageRequest(BaseModel):
-    team_id: int
-    group_id: int
 
 
 class OverrideMatchRequest(BaseModel):

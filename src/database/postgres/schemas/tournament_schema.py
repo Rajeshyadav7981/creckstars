@@ -8,7 +8,7 @@ class TournamentSchema(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     tournament_code = Column(String(10), unique=True, nullable=True, index=True)
     name = Column(String(200), nullable=False)
-    tournament_type = Column(String(20), nullable=False, default="league")  # league, knockout, group_knockout
+    tournament_type = Column(String(20), nullable=False, default="league_knockout")  # only league_knockout is supported; legacy rows may still be league/knockout
     overs_per_match = Column(Integer, nullable=False, default=20)
     ball_type = Column(String(20), nullable=True, default="tennis")  # tennis, leather, rubber
     start_date = Column(Date, nullable=True)

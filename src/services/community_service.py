@@ -37,17 +37,19 @@ class CommunityService:
                     session.add(PostHashtagSchema(post_id=post.id, hashtag_id=ht_map[t]))
             await session.flush()
 
-        # Process mentions — extract usernames, resolve to user_ids, create records
+        # Process mentions — resolve all usernames to user_ids in ONE query
+        # instead of one per mention.
         mentions = extract_mentions(clean_text)
         if mentions:
-            for username in mentions[:20]:  # Max 20 mentions per post
-                result = await session.execute(
-                    select(UserSchema.id).where(UserSchema.username == username)
-                )
-                mentioned_uid = result.scalar_one_or_none()
-                if mentioned_uid and mentioned_uid != user_id:
+            usernames = list(set(mentions[:20]))  # dedup, cap at 20
+            user_res = await session.execute(
+                select(UserSchema.id, UserSchema.username)
+                .where(UserSchema.username.in_(usernames))
+            )
+            for uid, _uname in user_res.all():
+                if uid and uid != user_id:
                     session.add(MentionSchema(
-                        mentioned_user_id=mentioned_uid,
+                        mentioned_user_id=uid,
                         mentioner_user_id=user_id,
                         post_id=post.id,
                     ))
@@ -117,16 +119,8 @@ class CommunityService:
             except Exception:
                 pass
 
-            if sort == "hot":
-                now = datetime.now(timezone.utc)
-                scored = []
-                for row in rows:
-                    post = row[0]
-                    hours_since = (now - post.created_at.replace(tzinfo=timezone.utc)).total_seconds() / 3600 if post.created_at else 0
-                    hot_score = (post.likes_count or 0) / ((hours_since + 2) ** 1.5)
-                    scored.append((row, hot_score))
-                scored.sort(key=lambda x: x[1], reverse=True)
-                rows = [item[0] for item in scored]
+            # NOTE: hot-score sorting now happens in SQL inside list_posts —
+            # rows are already in the right order by the time they get here.
 
             posts = []
             for row in rows:
@@ -151,12 +145,15 @@ class CommunityService:
             except Exception:
                 pass
 
-        # Per-user liked state (always fresh, not cached)
+        # Per-user liked state (always fresh, not cached). Skip if guest.
         post_ids = [p["id"] for p in posts]
-        if post_ids:
+        if post_ids and user_id:
             liked_ids = await PostRepository.get_likes_for_posts(session, post_ids, user_id)
             for p in posts:
                 p["liked"] = p["id"] in liked_ids
+        else:
+            for p in posts:
+                p["liked"] = False
 
         return cached_posts
 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, Integer, case
 from src.database.postgres.db import get_async_db
-from src.utils.security import get_current_user
+from src.utils.security import get_current_user, get_current_user_optional
 from src.services.player_service import PlayerService
 from src.app.api.routers.models.player_model import CreatePlayerRequest, UpdatePlayerRequest
 from src.database.postgres.schemas.batting_scorecard_schema import BattingScorecardSchema
@@ -50,7 +50,7 @@ async def list_players(
 async def get_player(
     player_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     player = await PlayerService.get_player(session, player_id)
     return {
@@ -85,7 +85,7 @@ async def update_player(
 async def get_player_stats(
     player_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Get aggregated career stats for a player across all matches."""
     from src.database.redis.match_cache import MatchCache
@@ -401,5 +401,5 @@ async def get_player_stats(
         "recent_innings": recent_innings,
         "recent_bowling": recent_bowling,
     }
-    await MatchCache.set_generic(f"player_stats:{player_id}", result, ttl=120)
+    await MatchCache.set_generic(f"player_stats:{player_id}", result, ttl=600)
     return result

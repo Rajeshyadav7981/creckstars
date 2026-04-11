@@ -29,6 +29,9 @@ class MatchCache:
         try:
             r = await MatchCache._get_redis()
             key = f"match:{match_id}:state"
+            if data is None:
+                await r.delete(key)
+                return
             await r.set(key, json.dumps(data, default=str), ex=ttl)
         except Exception as e:
             logger.warning(f"Redis operation failed: {e}")
@@ -51,6 +54,10 @@ class MatchCache:
         try:
             r = await MatchCache._get_redis()
             key = f"match:{match_id}:scorecard"
+            if data is None:
+                # Treat None as an explicit invalidation rather than caching "null"
+                await r.delete(key)
+                return
             await r.set(key, json.dumps(data, default=str), ex=ttl)
         except Exception as e:
             logger.warning(f"Redis operation failed: {e}")
@@ -136,6 +143,9 @@ class MatchCache:
     async def set_generic(key: str, data, ttl: int = 30):
         try:
             r = await MatchCache._get_redis()
+            if data is None:
+                await r.delete(f"cache:{key}")
+                return
             await r.set(f"cache:{key}", json.dumps(data, default=str), ex=ttl)
         except Exception as e:
             logger.warning(f"Redis operation failed: {e}")

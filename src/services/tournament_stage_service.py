@@ -1,12 +1,15 @@
+import random
+import string
+
 from fastapi import HTTPException, status
-from sqlalchemy import select, func as sa_func
+from sqlalchemy import select, delete as sa_delete, insert as sa_insert, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
-from itertools import combinations
 
 from src.database.postgres.repositories.tournament_stage_repository import TournamentStageRepository
 from src.database.postgres.repositories.match_repository import MatchRepository
 from src.database.postgres.repositories.tournament_repository import TournamentRepository
+from src.services import round_registry
 from src.database.postgres.schemas.match_schema import MatchSchema
 from src.database.postgres.schemas.innings_schema import InningsSchema
 from src.database.postgres.schemas.tournament_stage_schema import TournamentStageSchema
@@ -16,6 +19,16 @@ from src.database.postgres.schemas.team_schema import TeamSchema
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _generate_unique_match_code() -> str:
+    """Generate a 7-char match code locally. Collision space is 36^6 ≈ 2.1B,
+    so per-batch collisions are vanishingly unlikely; the DB column has a
+    UNIQUE constraint as a backstop. Avoids the per-match SELECT loop in
+    MatchRepository.create() that runs up to 10× per match — a major
+    win when generating 20+ matches at once for a league round.
+    """
+    return "M" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
 class TournamentStageService:
@@ -50,21 +63,73 @@ class TournamentStageService:
     async def setup_groups(session, tournament_id, stage_id, groups_config):
         """Create groups within a stage and assign teams.
         groups_config: [{"name": "Group A", "team_ids": [1, 2, 3, 4]}, ...]
+
+        IDEMPOTENT: if groups already exist for this stage AND no match has
+        started yet, the existing groups and their (still-upcoming) fixtures
+        are wiped and re-created from scratch. This is what backs the
+        "Edit teams" / swap-before-fixtures-lock UX in the frontend.
+
+        If any match in the stage is non-upcoming (in_progress / completed /
+        walkover), the call is rejected with HTTP 400 — the bracket is locked.
         """
         stage = await TournamentStageRepository.get_stage_by_id(session, stage_id)
         if not stage or stage.tournament_id != tournament_id:
             raise HTTPException(status_code=404, detail="Stage not found")
 
+        existing_groups = await TournamentStageRepository.get_groups(session, stage_id)
+        if existing_groups:
+            # Re-arrangement path: refuse if any match has started. Use a
+            # cheap exists() check instead of loading all matches.
+            locked_q = await session.execute(
+                select(MatchSchema.id)
+                .where(MatchSchema.stage_id == stage_id)
+                .where(MatchSchema.status.notin_(["upcoming", None]))
+                .limit(1)
+            )
+            if locked_q.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot rearrange teams — at least one match in this stage has already started.",
+                )
+
+            # Bulk wipe in cascade order: matches → group_teams → groups.
+            # Three round-trips total instead of N session.delete() calls.
+            existing_group_ids = [g.id for g in existing_groups]
+            await session.execute(
+                sa_delete(MatchSchema).where(MatchSchema.stage_id == stage_id)
+            )
+            if existing_group_ids:
+                await session.execute(
+                    sa_delete(TournamentGroupTeamSchema)
+                    .where(TournamentGroupTeamSchema.group_id.in_(existing_group_ids))
+                )
+                await session.execute(
+                    sa_delete(TournamentGroupSchema)
+                    .where(TournamentGroupSchema.id.in_(existing_group_ids))
+                )
+            await session.flush()
+
+        # Create groups one by one (need the auto-assigned IDs for the team
+        # rows below — group inserts can't be batched without an extra
+        # RETURNING dance, and N is small (typically 1–8)).
         created = []
+        team_rows_to_insert = []
         for i, cfg in enumerate(groups_config):
             group = await TournamentStageRepository.create_group(session, {
                 "stage_id": stage_id,
                 "group_name": cfg["name"],
                 "group_order": i,
             })
-            for tid in cfg.get("team_ids", []):
-                await TournamentStageRepository.add_team_to_group(session, group.id, tid)
             created.append(group)
+            for tid in cfg.get("team_ids", []):
+                team_rows_to_insert.append({"group_id": group.id, "team_id": tid})
+
+        # Single bulk INSERT for ALL group_team rows across ALL groups.
+        # 20 teams in 4 groups → 1 INSERT instead of 20 add_team_to_group calls.
+        if team_rows_to_insert:
+            await session.execute(
+                sa_insert(TournamentGroupTeamSchema).values(team_rows_to_insert)
+            )
 
         # Mark first stage as in_progress if it's the first
         stages = await TournamentStageRepository.get_stages(session, tournament_id)
@@ -82,7 +147,8 @@ class TournamentStageService:
             raise HTTPException(status_code=404, detail="Stage not found")
 
         tournament = await TournamentRepository.get_by_id(session, tournament_id)
-        is_knockout = stage.stage_name in ("quarter_final", "semi_final", "final")
+        is_knockout = round_registry.is_knockout(stage.stage_name)
+        round_def = round_registry.by_name(stage.stage_name)
 
         # Block knockout match generation if previous stage isn't completed
         if is_knockout:
@@ -108,12 +174,23 @@ class TournamentStageService:
             qualified_team_ids = []
             if prev_stages:
                 last_prev = prev_stages[-1]
-                prev_groups = await TournamentStageRepository.get_groups(session, last_prev.id)
-                for pg in prev_groups:
-                    team_rows = await TournamentStageRepository.get_group_teams(session, pg.id)
-                    for team, gt in team_rows:
-                        if gt.qualification_status == "qualified" and team.id not in qualified_team_ids:
-                            qualified_team_ids.append(team.id)
+                # Single JOIN query — replaces N "fetch teams per group" calls.
+                # Order by group_id then team_id so seeding within a group is
+                # preserved (matches the previous nested-loop iteration order).
+                qres = await session.execute(
+                    select(TournamentGroupTeamSchema.team_id, TournamentGroupTeamSchema.group_id)
+                    .join(TournamentGroupSchema, TournamentGroupTeamSchema.group_id == TournamentGroupSchema.id)
+                    .where(
+                        TournamentGroupSchema.stage_id == last_prev.id,
+                        TournamentGroupTeamSchema.qualification_status == "qualified",
+                    )
+                    .order_by(TournamentGroupTeamSchema.group_id, TournamentGroupTeamSchema.id)
+                )
+                seen = set()
+                for tid, _gid in qres.all():
+                    if tid not in seen:
+                        qualified_team_ids.append(tid)
+                        seen.add(tid)
 
             # If no previous stages or no qualified teams, use all tournament teams
             # (e.g., direct Final without group stages)
@@ -129,30 +206,50 @@ class TournamentStageService:
             if len(qualified_team_ids) < 2:
                 raise HTTPException(status_code=400, detail="Not enough teams for knockout (need at least 2)")
 
-            # Validate team count per stage type
-            stage_team_limits = {"quarter_final": 8, "semi_final": 4, "final": 2}
-            limit = stage_team_limits.get(stage.stage_name)
+            # Validate team count per stage type using the round registry
+            limit = round_def.max_teams if round_def else None
+            min_needed = round_def.min_teams if round_def else 2
             if limit and len(qualified_team_ids) > limit:
                 qualified_team_ids = qualified_team_ids[:limit]
-            if limit and len(qualified_team_ids) < limit:
-                # For SF with < 4 teams but >= 2: just do Final
+            if len(qualified_team_ids) < min_needed:
+                # SF degrade-to-Final fallback: if a SF stage is asked to run
+                # with only 2 qualified teams, treat it as a Final pairing.
                 if stage.stage_name == "semi_final" and len(qualified_team_ids) >= 2:
                     qualified_team_ids = qualified_team_ids[:2]
                 else:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"{stage.stage_name.replace('_', ' ').title()} needs {limit} teams, but only {len(qualified_team_ids)} qualified"
+                        detail=f"{(round_def.label if round_def else stage.stage_name)} needs {min_needed} teams, but only {len(qualified_team_ids)} qualified"
                     )
 
-            # Create a single group for the knockout stage
+            # Create a single group for the knockout stage + bulk-assign teams
             group = await TournamentStageRepository.create_group(session, {
                 "stage_id": stage_id,
                 "group_name": stage.stage_name.replace("_", " ").title(),
                 "group_order": 0,
             })
-            for tid in qualified_team_ids:
-                await TournamentStageRepository.add_team_to_group(session, group.id, tid)
+            if qualified_team_ids:
+                await session.execute(
+                    sa_insert(TournamentGroupTeamSchema).values([
+                        {"group_id": group.id, "team_id": tid}
+                        for tid in qualified_team_ids
+                    ])
+                )
             groups = [group]
+
+        # Bulk-load team rows for ALL groups in this stage in ONE query
+        # instead of N (one per group). Build {group_id: [team_id, ...]}.
+        group_ids = [g.id for g in groups]
+        teams_by_group = {g.id: [] for g in groups}
+        if group_ids:
+            tg_result = await session.execute(
+                select(
+                    TournamentGroupTeamSchema.group_id,
+                    TournamentGroupTeamSchema.team_id,
+                ).where(TournamentGroupTeamSchema.group_id.in_(group_ids))
+            )
+            for gid, tid in tg_result.all():
+                teams_by_group[gid].append(tid)
 
         # Count existing matches for numbering (count only, no row data needed)
         count_result = await session.execute(
@@ -160,46 +257,39 @@ class TournamentStageService:
         )
         match_num = (count_result.scalar() or 0) + 1
 
-        all_matches = []
+        # Build the full list of match dicts in memory, then ONE bulk INSERT.
+        # Replaces N MatchRepository.create() calls, each of which did its own
+        # commit + refresh + up to 10 SELECTs for unique-code generation.
+        # 20-match league stage: ~50 round-trips → 2 round-trips.
+        match_dicts = []
+        strategy = round_def.pair_strategy if round_def else (
+            "cross_seed" if is_knockout else "round_robin"
+        )
         for group in groups:
-            team_rows = await TournamentStageRepository.get_group_teams(session, group.id)
-            team_ids = [team.id for team, gt in team_rows]
+            team_ids = teams_by_group.get(group.id, [])
+            for ta_id, tb_id in round_registry.pair_teams(strategy, team_ids):
+                match_dicts.append({
+                    "tournament_id": tournament_id,
+                    "team_a_id": ta_id,
+                    "team_b_id": tb_id,
+                    "overs": tournament.overs_per_match,
+                    "match_type": stage.stage_name,
+                    "stage_id": stage_id,
+                    "group_id": group.id,
+                    "match_number": match_num,
+                    "created_by": tournament.created_by,
+                    "match_code": _generate_unique_match_code(),
+                })
+                match_num += 1
 
-            if is_knockout:
-                # Knockout: pair 1st vs last, 2nd vs second-last (cross-seeding)
-                pairs = []
-                for i in range(len(team_ids) // 2):
-                    pairs.append((team_ids[i], team_ids[len(team_ids) - 1 - i]))
-                for ta_id, tb_id in pairs:
-                    match = await MatchRepository.create(session, {
-                        "tournament_id": tournament_id,
-                        "team_a_id": ta_id,
-                        "team_b_id": tb_id,
-                        "overs": tournament.overs_per_match,
-                        "match_type": stage.stage_name,
-                        "stage_id": stage_id,
-                        "group_id": group.id,
-                        "match_number": match_num,
-                        "created_by": tournament.created_by,
-                    })
-                    all_matches.append(match)
-                    match_num += 1
-            else:
-                # Round-robin: every pair plays once
-                for ta_id, tb_id in combinations(team_ids, 2):
-                    match = await MatchRepository.create(session, {
-                        "tournament_id": tournament_id,
-                        "team_a_id": ta_id,
-                        "team_b_id": tb_id,
-                        "overs": tournament.overs_per_match,
-                        "match_type": stage.stage_name,
-                        "stage_id": stage_id,
-                        "group_id": group.id,
-                        "match_number": match_num,
-                        "created_by": tournament.created_by,
-                    })
-                    all_matches.append(match)
-                    match_num += 1
+        all_matches = []
+        if match_dicts:
+            # Single bulk INSERT … RETURNING * — get the created rows back so
+            # we can return them to the caller (the router serializes the count).
+            bulk_result = await session.execute(
+                sa_insert(MatchSchema).returning(MatchSchema).values(match_dicts)
+            )
+            all_matches = list(bulk_result.scalars().all())
 
         # Mark stage as in_progress if matches were created
         if all_matches and stage.status == "upcoming":
@@ -359,82 +449,123 @@ class TournamentStageService:
 
     @staticmethod
     async def get_stages_with_details(session, tournament_id):
-        """Get all stages with their groups, teams, and match counts."""
+        """Get all stages with their groups, teams, and match counts.
+
+        Replaces the old N+M+N×M query pyramid (one query per stage, one per
+        group, one per group's teams, one per group's matches, one per stage's
+        matches) with **5 batched queries total**:
+
+          1. all stages for the tournament
+          2. all groups for those stages
+          3. all (group_team, team) rows for those groups
+          4. all matches for those stages (with their group_id)
+          5. all teams referenced by those matches
+
+        Then assemble the hierarchy in-memory. Output shape is identical.
+        """
+        from collections import defaultdict
+
         stages = await TournamentStageRepository.get_stages(session, tournament_id)
-        result = []
-        for stage in stages:
-            groups = await TournamentStageRepository.get_groups(session, stage.id)
-            groups_data = []
-            for g in groups:
-                team_rows = await TournamentStageRepository.get_group_teams(session, g.id)
-                teams = [
-                    {
-                        "team_id": t.id,
-                        "team_name": t.name,
-                        "short_name": t.short_name,
-                        "qualification_status": gt.qualification_status,
-                    }
-                    for t, gt in team_rows
-                ]
+        if not stages:
+            return []
+        stage_ids = [s.id for s in stages]
 
-                # Count matches (only need id + status)
-                match_result = await session.execute(
-                    select(MatchSchema).options(load_only(
-                        MatchSchema.id, MatchSchema.status,
-                    )).where(MatchSchema.group_id == g.id)
+        # 2. All groups for all stages — one query
+        groups_res = await session.execute(
+            select(TournamentGroupSchema)
+            .where(TournamentGroupSchema.stage_id.in_(stage_ids))
+            .order_by(TournamentGroupSchema.stage_id, TournamentGroupSchema.group_order)
+        )
+        all_groups = list(groups_res.scalars().all())
+        group_ids = [g.id for g in all_groups]
+        groups_by_stage = defaultdict(list)
+        for g in all_groups:
+            groups_by_stage[g.stage_id].append(g)
+
+        # 3. All (team, group_team_status) rows for all groups — one query
+        teams_by_group = defaultdict(list)
+        if group_ids:
+            gt_res = await session.execute(
+                select(
+                    TournamentGroupTeamSchema.group_id,
+                    TeamSchema.id,
+                    TeamSchema.name,
+                    TeamSchema.short_name,
+                    TournamentGroupTeamSchema.qualification_status,
                 )
-                group_matches = match_result.scalars().all()
-                total = len(group_matches)
-                completed = sum(1 for m in group_matches if m.status == "completed")
-
-                groups_data.append({
-                    "group_id": g.id,
-                    "group_name": g.group_name,
-                    "teams": teams,
-                    "total_matches": total,
-                    "completed_matches": completed,
+                .join(TeamSchema, TournamentGroupTeamSchema.team_id == TeamSchema.id)
+                .where(TournamentGroupTeamSchema.group_id.in_(group_ids))
+            )
+            for gid, tid, tname, tshort, qstatus in gt_res.all():
+                teams_by_group[gid].append({
+                    "team_id": tid,
+                    "team_name": tname,
+                    "short_name": tshort,
+                    "qualification_status": qstatus,
                 })
 
-            # Also get matches directly assigned to this stage (not via group)
-            stage_match_result = await session.execute(
+        # 4. All matches for the stages — one query (covers both group-attached
+        #    and stage-only matches; we partition them in-memory below).
+        matches_by_stage = defaultdict(list)
+        match_team_ids = set()
+        if stage_ids:
+            match_res = await session.execute(
                 select(MatchSchema).options(load_only(
                     MatchSchema.id, MatchSchema.team_a_id, MatchSchema.team_b_id,
                     MatchSchema.status, MatchSchema.result_summary, MatchSchema.match_date,
                     MatchSchema.time_slot, MatchSchema.match_type, MatchSchema.stage_id,
-                    MatchSchema.tournament_id,
+                    MatchSchema.group_id, MatchSchema.tournament_id,
                 )).where(
-                    MatchSchema.stage_id == stage.id,
                     MatchSchema.tournament_id == tournament_id,
+                    MatchSchema.stage_id.in_(stage_ids),
                 )
             )
-            stage_matches = stage_match_result.scalars().all()
+            for m in match_res.scalars().all():
+                matches_by_stage[m.stage_id].append(m)
+                if m.team_a_id:
+                    match_team_ids.add(m.team_a_id)
+                if m.team_b_id:
+                    match_team_ids.add(m.team_b_id)
 
-            # Batch-load all teams for this stage's matches (1 query instead of 2 per match)
-            stage_team_ids = set()
-            for m in stage_matches:
-                if m.team_a_id: stage_team_ids.add(m.team_a_id)
-                if m.team_b_id: stage_team_ids.add(m.team_b_id)
-            stage_teams = {}
-            if stage_team_ids:
-                t_res = await session.execute(
-                    select(TeamSchema).options(load_only(TeamSchema.id, TeamSchema.name, TeamSchema.short_name))
-                    .where(TeamSchema.id.in_(stage_team_ids))
-                )
-                for t in t_res.scalars().all():
-                    stage_teams[t.id] = t
+        # 5. All teams referenced by those matches — one query
+        team_lookup = {}
+        if match_team_ids:
+            t_res = await session.execute(
+                select(TeamSchema.id, TeamSchema.name, TeamSchema.short_name)
+                .where(TeamSchema.id.in_(match_team_ids))
+            )
+            for tid, tname, tshort in t_res.all():
+                team_lookup[tid] = (tname, tshort)
+
+        # Assemble the hierarchy
+        result = []
+        for stage in stages:
+            stage_matches = matches_by_stage.get(stage.id, [])
+
+            groups_data = []
+            for g in groups_by_stage.get(stage.id, []):
+                # Per-group match counts derived from the in-memory match list.
+                gm = [m for m in stage_matches if m.group_id == g.id]
+                groups_data.append({
+                    "group_id": g.id,
+                    "group_name": g.group_name,
+                    "teams": teams_by_group.get(g.id, []),
+                    "total_matches": len(gm),
+                    "completed_matches": sum(1 for m in gm if m.status == "completed"),
+                })
 
             matches_data = []
             for m in stage_matches:
-                ta = stage_teams.get(m.team_a_id)
-                tb = stage_teams.get(m.team_b_id)
+                ta = team_lookup.get(m.team_a_id)
+                tb = team_lookup.get(m.team_b_id)
                 matches_data.append({
                     "id": m.id,
                     "team_a_id": m.team_a_id,
                     "team_b_id": m.team_b_id,
-                    "team_a_name": ta.name if ta else None,
-                    "team_b_name": tb.name if tb else None,
-                    "team_a_short": ta.short_name if ta else None,
-                    "team_b_short": tb.short_name if tb else None,
+                    "team_a_name": ta[0] if ta else None,
+                    "team_b_name": tb[0] if tb else None,
+                    "team_a_short": ta[1] if ta else None,
+                    "team_b_short": tb[1] if tb else None,
                     "status": m.status,
                     "result_summary": m.result_summary,
                     "match_date": m.match_date.isoformat() if m.match_date else None,
@@ -454,48 +585,6 @@ class TournamentStageService:
                 "completed_matches": sum(1 for m in stage_matches if m.status == "completed"),
             })
         return result
-
-    @staticmethod
-    async def move_team_between_groups(session, tournament_id, stage_id, team_id, from_group_id, to_group_id):
-        """Move a team from one group to another within the same stage."""
-        stage = await TournamentStageRepository.get_stage_by_id(session, stage_id)
-        if not stage or stage.tournament_id != tournament_id:
-            raise HTTPException(status_code=404, detail="Stage not found")
-
-        # Check no completed matches involve this team in the source group (existence only)
-        result = await session.execute(
-            select(MatchSchema.id).where(
-                MatchSchema.group_id == from_group_id,
-                MatchSchema.status == "completed",
-                ((MatchSchema.team_a_id == team_id) | (MatchSchema.team_b_id == team_id)),
-            ).limit(1)
-        )
-        if result.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail="Cannot move team with completed matches in this group")
-
-        # Remove from source group
-        removed = await TournamentStageRepository.remove_team_from_group(session, from_group_id, team_id)
-        if not removed:
-            raise HTTPException(status_code=404, detail="Team not found in source group")
-
-        # Delete any upcoming matches for this team in the source group
-        upcoming = await session.execute(
-            select(MatchSchema).options(load_only(
-                MatchSchema.id,
-            )).where(
-                MatchSchema.group_id == from_group_id,
-                MatchSchema.status == "upcoming",
-                ((MatchSchema.team_a_id == team_id) | (MatchSchema.team_b_id == team_id)),
-            )
-        )
-        for m in upcoming.scalars().all():
-            await session.delete(m)
-
-        # Add to target group
-        await TournamentStageRepository.add_team_to_group(session, to_group_id, team_id)
-
-        await session.commit()
-        return {"message": "Team moved successfully"}
 
     @staticmethod
     async def on_match_completed(session, match_id):
@@ -548,7 +637,12 @@ class TournamentStageService:
         # Process qualifications — different logic for group vs knockout stages
         groups = await TournamentStageRepository.get_groups(session, stage.id)
         qualified_teams = []
-        is_knockout_stage = stage.stage_name in ("quarter_final", "semi_final", "final")
+        is_knockout_stage = round_registry.is_knockout(stage.stage_name)
+
+        # Collect (group_id, team_id) tuples per target status, then bulk-apply
+        # at the end with a single UPDATE per status value (instead of N×2
+        # round-trips through update_team_status).
+        status_pairs = {"qualified": [], "eliminated": []}
 
         if is_knockout_stage:
             # Knockout: winners advance, in match order (important for bracket seeding)
@@ -565,13 +659,10 @@ class TournamentStageService:
                         "group_name": f"Match {match_idx}",
                         "match_number": m.match_number or m.id,
                     })
-                    # Mark in group
+                    # Mark winner/loser in every group of the stage
                     for g in groups:
-                        try:
-                            await TournamentStageRepository.update_team_status(session, g.id, m.winner_id, "qualified")
-                            await TournamentStageRepository.update_team_status(session, g.id, loser_id, "eliminated")
-                        except Exception as e:
-                            logger.warning(f"Failed to update team qualification status in group {g.id}: {e}")
+                        status_pairs["qualified"].append((g.id, m.winner_id))
+                        status_pairs["eliminated"].append((g.id, loser_id))
         else:
             # Group stage: top N from each group by standings
             for group in groups:
@@ -579,18 +670,21 @@ class TournamentStageService:
                 standings = group_data["standings"]
                 for i, s in enumerate(standings):
                     if i < top_n:
-                        await TournamentStageRepository.update_team_status(
-                            session, group.id, s["team_id"], "qualified"
-                        )
+                        status_pairs["qualified"].append((group.id, s["team_id"]))
                         qualified_teams.append({
                             "team_id": s["team_id"],
                             "group_rank": i + 1,
                             "group_name": group.group_name,
                         })
                     else:
-                        await TournamentStageRepository.update_team_status(
-                            session, group.id, s["team_id"], "eliminated"
-                        )
+                        status_pairs["eliminated"].append((group.id, s["team_id"]))
+
+        # Single batch UPDATE per status value (1–2 queries total instead of
+        # 2×N SELECT+UPDATE pairs from the old per-row update_team_status calls).
+        try:
+            await TournamentStageRepository.bulk_update_team_status(session, status_pairs)
+        except Exception as e:
+            logger.warning(f"Bulk team status update failed: {e}")
 
         # Check if there's a next stage
         stages = await TournamentStageRepository.get_stages(session, stage.tournament_id)
@@ -601,18 +695,15 @@ class TournamentStageService:
             await session.commit()
             return
 
-        # Find the correct next stage based on qualified team count
-        # Route to the right knockout stage:
-        #   5-8 teams → QF (with byes for top seeds if < 8)
-        #   3-4 teams → SF
-        #   2 teams → Final
+        # Find the correct next stage based on qualified team count.
+        # Min-team thresholds come from the round registry — never hard-code.
         team_count = len(qualified_teams)
-        stage_min_teams = {"quarter_final": 5, "semi_final": 3, "final": 2}
 
         next_stage = None
         for idx in range(current_idx + 1, len(stages)):
             candidate = stages[idx]
-            min_needed = stage_min_teams.get(candidate.stage_name, 2)
+            cand_def = round_registry.by_name(candidate.stage_name)
+            min_needed = cand_def.min_teams if cand_def else 2
             if team_count >= min_needed:
                 next_stage = candidate
                 break
@@ -630,7 +721,7 @@ class TournamentStageService:
         if not tournament:
             tournament = await TournamentRepository.get_by_id(session, stage.tournament_id)
 
-        if next_stage.stage_name in ("quarter_final", "semi_final", "final"):
+        if round_registry.is_knockout(next_stage.stage_name):
             pairs = []        # [(team_a_id, team_b_id)] — actual matches
             bye_team_ids = [] # Teams that auto-advance (no opponent)
 
@@ -694,11 +785,17 @@ class TournamentStageService:
             }
             label_prefix = stage_labels.get(next_stage.stage_name, "M")
 
-            # Create bye matches first (auto-completed walkovers for top seeds)
+            # Collect group_team rows + match dicts in memory, then bulk-insert
+            # at the end. Replaces 2N round-trips per bye team and 3N per pair
+            # (add_team × 1-2 + match.create) with 2 bulk INSERTs total.
+            group_team_rows = []
+            new_matches = []
+
+            # Bye matches first (auto-completed walkovers for top seeds)
             for bye_idx, bye_tid in enumerate(bye_team_ids):
-                await TournamentStageRepository.add_team_to_group(session, group.id, bye_tid)
+                group_team_rows.append({"group_id": group.id, "team_id": bye_tid})
                 bye_label = f"{label_prefix} {bye_idx + 1} (BYE)"
-                await MatchRepository.create(session, {
+                new_matches.append({
                     "tournament_id": stage.tournament_id,
                     "team_a_id": bye_tid,
                     "team_b_id": bye_tid,  # Same team = bye indicator
@@ -713,16 +810,17 @@ class TournamentStageService:
                     "winner_id": bye_tid,
                     "result_summary": f"BYE — auto-advances",
                     "created_by": tournament.created_by if tournament else 1,
+                    "match_code": _generate_unique_match_code(),
                 })
                 match_num += 1
 
-            # Create actual matches
+            # Real matches
             actual_match_start = len(bye_team_ids) + 1
             for idx, (ta_id, tb_id) in enumerate(pairs):
-                await TournamentStageRepository.add_team_to_group(session, group.id, ta_id)
-                await TournamentStageRepository.add_team_to_group(session, group.id, tb_id)
+                group_team_rows.append({"group_id": group.id, "team_id": ta_id})
+                group_team_rows.append({"group_id": group.id, "team_id": tb_id})
                 match_label = f"{label_prefix} {actual_match_start + idx}" if len(pairs) > 1 or bye_team_ids else label_prefix
-                await MatchRepository.create(session, {
+                new_matches.append({
                     "tournament_id": stage.tournament_id,
                     "team_a_id": ta_id,
                     "team_b_id": tb_id,
@@ -733,8 +831,19 @@ class TournamentStageService:
                     "match_number": match_num,
                     "time_slot": match_label,  # Store label in time_slot for display
                     "created_by": tournament.created_by if tournament else 1,
+                    "match_code": _generate_unique_match_code(),
                 })
                 match_num += 1
+
+            # Bulk-insert all group memberships and all matches in 2 round-trips
+            if group_team_rows:
+                await session.execute(
+                    sa_insert(TournamentGroupTeamSchema).values(group_team_rows)
+                )
+            if new_matches:
+                await session.execute(
+                    sa_insert(MatchSchema).values(new_matches)
+                )
 
             # 3rd Place Playoff: if current stage is semi_final and tournament has the option
             if stage.stage_name == "semi_final" and tournament and getattr(tournament, 'has_third_place_playoff', False):

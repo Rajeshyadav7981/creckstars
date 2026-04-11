@@ -364,7 +364,21 @@ class ScoringService:
             "created_by": user_id,
         })
 
-        # Auto-complete innings if all overs/wickets/target done
+        # Auto-complete innings if all overs/wickets/target done.
+        #
+        # IMPORTANT: we mark only the *innings* as completed here. We do NOT
+        # auto-finalize the *match* even when the chase target is reached.
+        # That would create asymmetric UX:
+        #   • all-out / overs-done in 2nd innings → match.status='live' →
+        #     scorer sees the End Match popup on reopen
+        #   • chase target reached → match.status='completed' →
+        #     scorer can't reach the End Match popup on reopen
+        #
+        # By keeping match.status='live' until end_match is explicitly called,
+        # both flows go through the same "innings_break" path and the scorer
+        # always gets to confirm or undo via the InningsEndDialog. The
+        # tournament stage progression also defers until the scorer confirms,
+        # which avoids premature notifications on a wrong winning ball.
         if innings_complete:
             await InningsRepository.update(session, innings.id, {"status": "completed"})
             # Mark batsmen as not out
@@ -373,29 +387,6 @@ class ScoringService:
                 if not card.is_out and card.how_out is None:
                     card.how_out = "not out"
             await session.flush()
-
-            # If target reached in 2nd innings (or 2nd SO innings), auto-end match
-            if innings.target and new_total_runs >= innings.target:
-                team_a = await session.get(TeamSchema, match.team_a_id)
-                team_b = await session.get(TeamSchema, match.team_b_id)
-                winner_id = innings.batting_team_id
-                winner_name = team_a.name if winner_id == match.team_a_id else team_b.name if team_b else "Team"
-                is_super_over = innings.innings_number > 2
-                if is_super_over:
-                    result_summary = f"{winner_name} won in Super Over"
-                else:
-                    wickets_left = 10 - new_total_wickets
-                    result_summary = f"{winner_name} won by {wickets_left} wickets"
-                await MatchRepository.update(session, match_id, {
-                    "status": "completed", "winner_id": winner_id,
-                    "result_summary": result_summary,
-                })
-                # Trigger stage progression (qualifications, next stage bracket)
-                try:
-                    from src.services.tournament_stage_service import TournamentStageService
-                    await TournamentStageService.on_match_completed(session, match_id)
-                except Exception as e:
-                    logger.error(f"Stage progression failed after auto-complete for match {match_id}: {e}")
 
         await session.commit()
 
@@ -614,3 +605,30 @@ class ScoringService:
         result = {"winner_id": winner_id, "result_summary": result_summary}
         await ws_manager.broadcast(match_id, {"type": "match_end", "data": result})
         return result
+
+    @staticmethod
+    async def swap_batters(session: AsyncSession, match_id: int):
+        """Manually swap striker and non-striker. Not a cricket rule — admin option."""
+        match = await MatchRepository.get_by_id(session, match_id)
+        if not match or match.status != "live":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
+
+        result = await session.execute(
+            select(InningsSchema)
+            .where(InningsSchema.match_id == match_id, InningsSchema.innings_number == match.current_innings)
+            .with_for_update()
+        )
+        innings = result.scalar_one_or_none()
+        if not innings or innings.status != "in_progress":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Innings not in progress")
+
+        if not innings.current_striker_id or not innings.current_non_striker_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Both batsmen must be set")
+
+        await InningsRepository.update(session, innings.id, {
+            "current_striker_id": innings.current_non_striker_id,
+            "current_non_striker_id": innings.current_striker_id,
+        })
+        await session.commit()
+        await ws_manager.broadcast(match_id, {"type": "delivery", "data": {"swap": True}})
+        return {"message": "Batters swapped"}

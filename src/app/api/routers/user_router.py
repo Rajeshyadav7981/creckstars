@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy import text, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
-from src.utils.security import get_current_user
+from src.utils.security import get_current_user, get_current_user_optional
 from src.database.postgres.repositories.user_repository import UserRepository
 from src.database.postgres.schemas.user_schema import UserSchema, UserFollowSchema
 from src.app.api.routers.models.user_model import UserSearchResponse
@@ -149,7 +149,7 @@ async def mention_search(
 async def get_public_profile(
     username: str,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Get a user's public profile by @username. Profile data cached 5min in Redis."""
     uname = username.lower()
@@ -190,10 +190,10 @@ async def get_public_profile(
             except Exception:
                 pass
 
-    # Follow status is user-specific — always check live
+    # Follow status is user-specific — always check live (skip for guests)
     is_following = False
     target_id = profile_data["id"]
-    if user.id != target_id:
+    if user and user.id != target_id:
         follow_check = await session.execute(
             select(UserFollowSchema.follower_id).where(
                 UserFollowSchema.follower_id == user.id,
@@ -205,7 +205,7 @@ async def get_public_profile(
     return {
         **profile_data,
         "is_following": is_following,
-        "is_self": user.id == target_id,
+        "is_self": bool(user and user.id == target_id),
     }
 
 
@@ -500,7 +500,7 @@ async def get_followers(
     limit: int = Query(20, ge=1, le=50),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Get followers of a user. Base list cached 120s in Redis."""
     from sqlalchemy.orm import load_only
@@ -533,10 +533,10 @@ async def get_followers(
             except Exception:
                 pass
 
-    # Follow-back status is user-specific — always check live
+    # Follow-back status is user-specific — always check live (skip for guests)
     user_ids = [u["id"] for u in users_data]
     following_set = set()
-    if user_ids:
+    if user and user_ids:
         follows_result = await session.execute(
             select(UserFollowSchema.following_id).where(
                 UserFollowSchema.follower_id == user.id,
@@ -554,7 +554,7 @@ async def get_following(
     limit: int = Query(20, ge=1, le=50),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Get users that target follows. Base list cached 120s in Redis."""
     from sqlalchemy.orm import load_only
@@ -587,10 +587,10 @@ async def get_following(
             except Exception:
                 pass
 
-    # Follow-back status is user-specific — always check live
+    # Follow-back status is user-specific — always check live (skip for guests)
     user_ids = [u["id"] for u in users_data]
     following_set = set()
-    if user_ids:
+    if user and user_ids:
         follows_result = await session.execute(
             select(UserFollowSchema.following_id).where(
                 UserFollowSchema.follower_id == user.id,

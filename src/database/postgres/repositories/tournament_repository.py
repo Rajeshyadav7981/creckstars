@@ -28,20 +28,74 @@ class TournamentRepository:
         result = await session.execute(select(TournamentSchema).where(TournamentSchema.tournament_code == code))
         return result.scalar_one_or_none()
 
+    _LIST_COLS = [
+        TournamentSchema.id, TournamentSchema.tournament_code, TournamentSchema.name,
+        TournamentSchema.tournament_type, TournamentSchema.overs_per_match,
+        TournamentSchema.ball_type, TournamentSchema.start_date, TournamentSchema.end_date,
+        TournamentSchema.status, TournamentSchema.organizer_name, TournamentSchema.location,
+        TournamentSchema.entry_fee, TournamentSchema.prize_pool, TournamentSchema.banner_url,
+        TournamentSchema.created_by, TournamentSchema.created_at,
+    ]
+
     @staticmethod
     async def get_all(
         session: AsyncSession, status: str = None, created_by: int = None,
-        search: str = None, limit: int = 50, offset: int = 0,
+        search: str = None, for_user: int = None,
+        limit: int = 50, offset: int = 0,
     ) -> list:
-        from sqlalchemy import or_
-        query = select(TournamentSchema).options(load_only(
-            TournamentSchema.id, TournamentSchema.tournament_code, TournamentSchema.name,
-            TournamentSchema.tournament_type, TournamentSchema.overs_per_match,
-            TournamentSchema.ball_type, TournamentSchema.start_date, TournamentSchema.end_date,
-            TournamentSchema.status, TournamentSchema.organizer_name, TournamentSchema.location,
-            TournamentSchema.entry_fee, TournamentSchema.prize_pool, TournamentSchema.banner_url,
-            TournamentSchema.created_by, TournamentSchema.created_at,
-        ))
+        """List tournaments. When `for_user` is set, returns tournaments the
+        user created OR where user's player is on a participating team.
+        Each returned tournament gets a `._role` attribute: organized|played|both.
+        """
+        from sqlalchemy import or_, case, and_, literal_column
+
+        if for_user:
+            from src.database.postgres.schemas.tournament_team_schema import TournamentTeamSchema
+            from src.database.postgres.schemas.team_player_schema import TeamPlayerSchema
+            from src.database.postgres.schemas.player_schema import PlayerSchema
+
+            # "played" = user's player is on a team in the tournament
+            played_exists = (
+                select(TournamentTeamSchema.id)
+                .join(TeamPlayerSchema, TournamentTeamSchema.team_id == TeamPlayerSchema.team_id)
+                .join(PlayerSchema, TeamPlayerSchema.player_id == PlayerSchema.id)
+                .where(
+                    TournamentTeamSchema.tournament_id == TournamentSchema.id,
+                    PlayerSchema.user_id == for_user,
+                )
+                .correlate(TournamentSchema)
+                .exists()
+            )
+            is_org = TournamentSchema.created_by == for_user
+            role_expr = case(
+                (and_(is_org, played_exists), literal_column("'both'")),
+                (is_org, literal_column("'organized'")),
+                else_=literal_column("'played'"),
+            ).label('role')
+
+            query = (
+                select(TournamentSchema, role_expr)
+                .options(load_only(*TournamentRepository._LIST_COLS))
+                .where(or_(is_org, played_exists))
+            )
+            if status:
+                query = query.where(TournamentSchema.status == status)
+            if search:
+                query = query.where(or_(
+                    TournamentSchema.name.ilike(f"%{search}%"),
+                    TournamentSchema.tournament_code.ilike(f"%{search}%"),
+                ))
+            query = query.order_by(TournamentSchema.created_at.desc()).limit(limit).offset(offset)
+            result = await session.execute(query)
+            tournaments = []
+            for row in result.all():
+                t = row[0]
+                t._role = row[1]
+                tournaments.append(t)
+            return tournaments
+
+        # Standard path
+        query = select(TournamentSchema).options(load_only(*TournamentRepository._LIST_COLS))
         if status:
             query = query.where(TournamentSchema.status == status)
         if created_by:

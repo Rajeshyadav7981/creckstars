@@ -19,12 +19,14 @@ class ScorecardService:
             return None
         innings_list = await InningsRepository.get_by_match(session, match_id)
 
-        # Pre-load team names
+        # Pre-load team names — single batched query (was N session.get round-trips)
         team_name_map = {}
-        for tid in set(filter(None, [match.team_a_id, match.team_b_id])):
-            team = await session.get(TeamSchema, tid)
-            if team:
-                team_name_map[tid] = team.name
+        _tids = [t for t in [match.team_a_id, match.team_b_id] if t]
+        if _tids:
+            _r = await session.execute(
+                select(TeamSchema.id, TeamSchema.name).where(TeamSchema.id.in_(_tids))
+            )
+            team_name_map = {tid: tname for tid, tname in _r.all()}
 
         result = {
             "match_id": match_id,
@@ -34,29 +36,55 @@ class ScorecardService:
             "overs": match.overs,
             "innings": [],
         }
+
+        # Bulk-load batting/bowling/fow/partnerships for ALL innings in 4 queries
+        # instead of 4 queries per innings (was 8 queries for a 2-innings match;
+        # now 4 regardless of innings count). Group by innings_id below.
+        from collections import defaultdict
+        innings_ids = [inn.id for inn in innings_list]
+        all_batting = await ScorecardRepository.get_batting_for_innings_ids(session, innings_ids)
+        all_bowling = await ScorecardRepository.get_bowling_for_innings_ids(session, innings_ids)
+        all_fow = await ScorecardRepository.get_fall_of_wickets_for_innings_ids(session, innings_ids)
+        all_partnerships = await ScorecardRepository.get_partnerships_for_innings_ids(session, innings_ids)
+
+        batting_by_inn = defaultdict(list)
+        for b in all_batting:
+            batting_by_inn[b.innings_id].append(b)
+        bowling_by_inn = defaultdict(list)
+        for b in all_bowling:
+            bowling_by_inn[b.innings_id].append(b)
+        fow_by_inn = defaultdict(list)
+        for f in all_fow:
+            fow_by_inn[f.innings_id].append(f)
+        partnerships_by_inn = defaultdict(list)
+        for p in all_partnerships:
+            partnerships_by_inn[p.innings_id].append(p)
+
+        # Bulk-load player names referenced anywhere in any innings — one query.
+        all_player_ids = set()
+        for b in all_batting:
+            all_player_ids.add(b.player_id)
+            if b.bowler_id:
+                all_player_ids.add(b.bowler_id)
+        for b in all_bowling:
+            all_player_ids.add(b.player_id)
+        for p in all_partnerships:
+            if p.player_a_id: all_player_ids.add(p.player_a_id)
+            if p.player_b_id: all_player_ids.add(p.player_b_id)
+        all_player_names = {}
+        if all_player_ids:
+            pres = await session.execute(
+                select(PlayerSchema.id, PlayerSchema.full_name)
+                .where(PlayerSchema.id.in_(all_player_ids))
+            )
+            all_player_names = {pid: pname for pid, pname in pres.all()}
+
         for inn in innings_list:
-            batting = await ScorecardRepository.get_batting_by_innings(session, inn.id)
-            bowling = await ScorecardRepository.get_bowling_by_innings(session, inn.id)
-            fow = await ScorecardRepository.get_fall_of_wickets(session, inn.id)
-            partnerships = await ScorecardRepository.get_partnerships(session, inn.id)
-
-            # Get player names
-            player_ids = set()
-            for b in batting:
-                player_ids.add(b.player_id)
-                if b.bowler_id:
-                    player_ids.add(b.bowler_id)
-            for b in bowling:
-                player_ids.add(b.player_id)
-            for p in partnerships:
-                if p.player_a_id: player_ids.add(p.player_a_id)
-                if p.player_b_id: player_ids.add(p.player_b_id)
-
-            player_names = {}
-            if player_ids:
-                res = await session.execute(select(PlayerSchema).options(load_only(PlayerSchema.id, PlayerSchema.full_name)).where(PlayerSchema.id.in_(player_ids)))
-                for p in res.scalars().all():
-                    player_names[p.id] = p.full_name
+            batting = batting_by_inn.get(inn.id, [])
+            bowling = bowling_by_inn.get(inn.id, [])
+            fow = fow_by_inn.get(inn.id, [])
+            partnerships = partnerships_by_inn.get(inn.id, [])
+            player_names = all_player_names
 
             batting_cards = []
             for b in batting:
@@ -325,12 +353,44 @@ class ScorecardService:
             return None
 
         if match.status == "completed":
+            # Pull the latest innings so the frontend can render a rich
+            # "match over" card (team / score / overs / target) instead of a
+            # bare stub. Keeps the screen visually consistent with the
+            # innings-break dialog.
+            all_innings = await InningsRepository.get_by_match(session, match_id)
+            last_inn = all_innings[-1] if all_innings else None
+            batting_team_name = None
+            bowling_team_name = None
+            target = None
+            if last_inn:
+                # Batched team-name lookup (1 query instead of 2 session.get round-trips)
+                _ids = [t for t in [last_inn.batting_team_id, last_inn.bowling_team_id] if t]
+                _names = {}
+                if _ids:
+                    _r = await session.execute(
+                        select(TeamSchema.id, TeamSchema.name).where(TeamSchema.id.in_(_ids))
+                    )
+                    _names = {tid: tname for tid, tname in _r.all()}
+                batting_team_name = _names.get(last_inn.batting_team_id)
+                bowling_team_name = _names.get(last_inn.bowling_team_id)
+                target = last_inn.target
             return {
                 "match_id": match_id,
                 "status": "completed",
                 "message": "Match completed",
                 "result_summary": match.result_summary,
                 "winner_id": match.winner_id,
+                # Last innings data for rich UI rendering
+                "innings_number": last_inn.innings_number if last_inn else None,
+                "batting_team_id": last_inn.batting_team_id if last_inn else None,
+                "bowling_team_id": last_inn.bowling_team_id if last_inn else None,
+                "batting_team_name": batting_team_name,
+                "bowling_team_name": bowling_team_name,
+                "total_runs": last_inn.total_runs if last_inn else 0,
+                "total_wickets": last_inn.total_wickets if last_inn else 0,
+                "total_overs": last_inn.total_overs if last_inn else 0,
+                "target": target,
+                "is_super_over": (last_inn.innings_number > 2) if last_inn else False,
             }
 
         if not match.current_innings:
@@ -343,8 +403,16 @@ class ScorecardService:
 
         # Detect innings break: innings completed but match still live (waiting for next innings)
         if innings.status == "completed" and match.status == "live":
-            batting_team = await session.get(TeamSchema, innings.batting_team_id)
-            bowling_team = await session.get(TeamSchema, innings.bowling_team_id)
+            # Batched team-name lookup (1 query instead of 2 session.get round-trips)
+            _ids = [t for t in [innings.batting_team_id, innings.bowling_team_id] if t]
+            _names = {}
+            if _ids:
+                _r = await session.execute(
+                    select(TeamSchema.id, TeamSchema.name).where(TeamSchema.id.in_(_ids))
+                )
+                _names = {tid: tname for tid, tname in _r.all()}
+            bat_name = _names.get(innings.batting_team_id) or "Team"
+            bowl_name = _names.get(innings.bowling_team_id) or "Team"
             is_super_over = innings.innings_number > 2
 
             # Detect tie: for even innings (2nd of pair), compare with previous innings
@@ -361,20 +429,25 @@ class ScorecardService:
                 "is_super_over": is_super_over,
                 "is_tied": is_tied,
                 "innings_number": innings.innings_number,
-                "batting_team_name": batting_team.name if batting_team else "Team",
-                "bowling_team_name": bowling_team.name if bowling_team else "Team",
+                "batting_team_name": bat_name,
+                "bowling_team_name": bowl_name,
                 "total_runs": innings.total_runs,
                 "total_wickets": innings.total_wickets,
                 "total_overs": innings.total_overs,
                 "target": (innings.total_runs or 0) + 1,
-                "message": f"{'Super Over' if is_super_over else 'Innings'} {innings.innings_number} completed. {batting_team.name if batting_team else 'Team'} scored {innings.total_runs}/{innings.total_wickets}",
+                "message": f"{'Super Over' if is_super_over else 'Innings'} {innings.innings_number} completed. {bat_name} scored {innings.total_runs}/{innings.total_wickets}",
             }
 
-        # Get team names
-        batting_team = await session.get(TeamSchema, innings.batting_team_id)
-        bowling_team = await session.get(TeamSchema, innings.bowling_team_id)
-        batting_team_name = batting_team.name if batting_team else "Team A"
-        bowling_team_name = bowling_team.name if bowling_team else "Team B"
+        # Get team names — single batched query instead of two session.get() round-trips
+        team_ids_for_innings = [t for t in [innings.batting_team_id, innings.bowling_team_id] if t]
+        team_name_lookup = {}
+        if team_ids_for_innings:
+            t_res = await session.execute(
+                select(TeamSchema.id, TeamSchema.name).where(TeamSchema.id.in_(team_ids_for_innings))
+            )
+            team_name_lookup = {tid: tname for tid, tname in t_res.all()}
+        batting_team_name = team_name_lookup.get(innings.batting_team_id) or "Team A"
+        bowling_team_name = team_name_lookup.get(innings.bowling_team_id) or "Team B"
 
         # Get player names
         player_ids = [innings.current_striker_id, innings.current_non_striker_id, innings.current_bowler_id]
@@ -424,9 +497,13 @@ class ScorecardService:
                 "economy": bcard.economy_rate,
             }
 
-        # Fetch dismissed player IDs for this innings (so frontend can filter them)
-        batting_cards = await ScorecardRepository.get_batting_by_innings(session, innings.id)
-        dismissed_player_ids = [b.player_id for b in batting_cards if b.is_out]
+        # Fetch dismissed player IDs — single narrow query instead of loading
+        # all batting cards. This runs on every live_state poll (~1/s).
+        from src.database.postgres.schemas.batting_scorecard_schema import BattingScorecardSchema as _BS
+        _dres = await session.execute(
+            select(_BS.player_id).where(_BS.innings_id == innings.id, _BS.is_out == True)
+        )
+        dismissed_player_ids = [r[0] for r in _dres.all()]
 
         # This over balls
         deliveries = await DeliveryRepository.get_by_innings(session, innings.id, innings.current_over)

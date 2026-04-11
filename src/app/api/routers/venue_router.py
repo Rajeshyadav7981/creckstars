@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
-from src.utils.security import get_current_user
+from src.utils.security import get_current_user, get_current_user_optional
 from src.services.venue_service import VenueService
 from src.app.api.routers.models.venue_model import CreateVenueRequest
 
@@ -31,7 +31,7 @@ async def create_venue(
 @router.get("/search-location")
 async def search_location(
     q: str = Query(..., min_length=2, description="Location search query"),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Search locations using OpenStreetMap Nominatim (free, no API key)."""
     results = await VenueService.search_location(q)
@@ -44,7 +44,7 @@ async def nearby_venues(
     lng: float = Query(..., description="Longitude"),
     radius: float = Query(50, ge=1, le=500, description="Radius in km"),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Find venues within a radius (km) of given coordinates."""
     rows = await VenueService.get_nearby_venues(session, lat, lng, radius)
@@ -74,7 +74,7 @@ async def list_venues(
 async def get_venue(
     venue_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     venue = await VenueService.get_venue(session, venue_id)
     return serialize_venue(venue)

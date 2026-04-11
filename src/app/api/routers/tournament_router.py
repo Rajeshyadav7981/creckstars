@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
-from src.utils.security import get_current_user
+from src.utils.security import get_current_user, get_current_user_optional
 from src.services.tournament_service import TournamentService
 from src.services.tournament_stage_service import TournamentStageService
 from src.database.postgres.repositories.match_repository import MatchRepository
@@ -13,7 +13,7 @@ from src.app.api.routers.models.tournament_model import (
     CreateTournamentRequest, AddTeamToTournamentRequest,
     SetupStagesRequest, SetupGroupsRequest,
     UpdateTournamentRequest, QualificationRuleRequest,
-    AddTeamToStageRequest, OverrideMatchRequest,
+    OverrideMatchRequest,
 )
 from src.database.redis.leaderboard_cache import LeaderboardCache
 from src.app.api.rate_limiter import limiter
@@ -71,15 +71,51 @@ async def list_tournaments(
     request: Request,
     status: str = Query(None),
     created_by: int = Query(None, description="Filter by creator user ID"),
+    for_user: int = Query(None, description="Fetch tournaments created OR played by this user (returns role field)"),
     search: str = Query(None, description="Search tournaments by name or code"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     tournaments = await TournamentService.get_tournaments(
-        session, status_filter=status, created_by=created_by, search=search, limit=limit, offset=offset,
+        session, status_filter=status,
+        created_by=created_by if not for_user else None,
+        search=search, for_user=for_user, limit=limit, offset=offset,
     )
+
+    # Lightweight per-tournament summary: stage count + match counts.
+    # Two batched aggregate queries instead of N+1.
+    from sqlalchemy import func as _func, select as _select, case as _case
+    from src.database.postgres.schemas.tournament_stage_schema import TournamentStageSchema
+    from src.database.postgres.schemas.match_schema import MatchSchema as _MS
+    tids = [t.id for t in tournaments]
+    stage_counts = {}
+    matches_total = {}
+    matches_completed = {}
+    if tids:
+        # Stage counts per tournament
+        sres = await session.execute(
+            _select(TournamentStageSchema.tournament_id, _func.count(TournamentStageSchema.id))
+            .where(TournamentStageSchema.tournament_id.in_(tids))
+            .group_by(TournamentStageSchema.tournament_id)
+        )
+        for tid, cnt in sres.all():
+            stage_counts[tid] = cnt or 0
+        # Match counts per tournament (total + completed)
+        mres = await session.execute(
+            _select(
+                _MS.tournament_id,
+                _func.count(_MS.id).label("total"),
+                _func.sum(_case((_MS.status == "completed", 1), else_=0)).label("completed"),
+            )
+            .where(_MS.tournament_id.in_(tids))
+            .group_by(_MS.tournament_id)
+        )
+        for tid, total, completed in mres.all():
+            matches_total[tid] = total or 0
+            matches_completed[tid] = int(completed or 0)
+
     return [{
         "id": t.id, "tournament_code": t.tournament_code, "name": t.name, "status": t.status,
         "tournament_type": t.tournament_type, "overs_per_match": t.overs_per_match,
@@ -92,6 +128,11 @@ async def list_tournaments(
         "prize_pool": t.prize_pool,
         "created_at": str(t.created_at) if t.created_at else None,
         "created_by": t.created_by,
+        # Stage / match summary so list cards can show progress at a glance
+        "stages_count": stage_counts.get(t.id, 0),
+        "matches_total": matches_total.get(t.id, 0),
+        "matches_completed": matches_completed.get(t.id, 0),
+        "role": getattr(t, '_role', None),
     } for t in tournaments]
 
 
@@ -99,7 +140,7 @@ async def list_tournaments(
 async def get_tournament(
     tournament_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     from src.utils.cache import cached as _cached
 
@@ -211,7 +252,7 @@ async def add_team_to_tournament(
 async def get_tournament_standings(
     tournament_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     # Cache standings (30s TTL) — expensive to recompute
     from src.database.redis.match_cache import MatchCache
@@ -236,16 +277,22 @@ async def get_tournament_standings(
 async def get_tournament_leaderboard(
     tournament_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     # Try Redis sorted-set cache first
     cached_batsmen = await LeaderboardCache.get_top_batsmen(tournament_id)
     cached_bowlers = await LeaderboardCache.get_top_bowlers(tournament_id)
     if cached_batsmen is not None and cached_bowlers is not None:
+        # Keep the response shape consistent regardless of cache state.
+        # The Redis sorted-set cache only stores batsmen + bowlers, so the
+        # other two lists come back empty on cache hit (the next miss will
+        # repopulate them from SQL). Frontend already handles empty arrays.
         return {
             "tournament_id": tournament_id,
             "top_batsmen": cached_batsmen,
             "top_bowlers": cached_bowlers,
+            "top_fielders": [],
+            "highest_scores": [],
         }
 
     # Cache miss -- fall back to SQL
@@ -294,39 +341,17 @@ async def setup_stages(
 ):
     stages_config = [{"name": s.name, "qualification_rule": s.qualification_rule} for s in req.stages]
     stages = await TournamentStageService.setup_stages(session, tournament_id, stages_config)
+    # Drop the cached tournament detail so the new stage is visible immediately
+    from src.utils.cache import invalidate as _invalidate_cache
+    await _invalidate_cache(f"tournament:{tournament_id}")
     return {"stages": [{"id": s.id, "stage_name": s.stage_name, "stage_order": s.stage_order} for s in stages]}
-
-
-@router.post("/{tournament_id}/stages/add")
-async def add_stage(
-    tournament_id: int,
-    req: SetupStagesRequest,
-    session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
-):
-    """Add stages to an existing tournament (appends after current stages)."""
-    existing = await TournamentStageService.get_stages_with_details(session, tournament_id)
-    max_order = max((s.get("stage_order", 0) for s in existing), default=0) if existing else 0
-
-    created = []
-    for i, s in enumerate(req.stages):
-        stage = await TournamentStageRepository.create_stage(session, {
-            "tournament_id": tournament_id,
-            "stage_name": s.name,
-            "stage_order": max_order + i + 1,
-            "status": "upcoming",
-            "qualification_rule": s.qualification_rule,
-        })
-        created.append(stage)
-    await session.commit()
-    return {"stages": [{"id": s.id, "stage_name": s.stage_name, "stage_order": s.stage_order} for s in created]}
 
 
 @router.get("/{tournament_id}/qualified-teams")
 async def get_qualified_teams(
     tournament_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     """Get teams that qualified from completed stages."""
     stages = await TournamentStageService.get_stages_with_details(session, tournament_id)
@@ -347,7 +372,7 @@ async def get_qualified_teams(
 async def get_stages(
     tournament_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     return await TournamentStageService.get_stages_with_details(session, tournament_id)
 
@@ -362,26 +387,9 @@ async def setup_groups(
 ):
     groups_config = [{"name": g.name, "team_ids": g.team_ids} for g in req.groups]
     groups = await TournamentStageService.setup_groups(session, tournament_id, stage_id, groups_config)
+    from src.utils.cache import invalidate as _invalidate_cache
+    await _invalidate_cache(f"tournament:{tournament_id}")
     return {"groups": [{"id": g.id, "group_name": g.group_name} for g in groups]}
-
-
-class MoveTeamRequest(BaseModel):
-    team_id: int
-    from_group_id: int
-    to_group_id: int
-
-
-@router.post("/{tournament_id}/stages/{stage_id}/move-team")
-async def move_team_between_groups(
-    tournament_id: int,
-    stage_id: int,
-    req: MoveTeamRequest,
-    session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
-):
-    return await TournamentStageService.move_team_between_groups(
-        session, tournament_id, stage_id, req.team_id, req.from_group_id, req.to_group_id,
-    )
 
 
 class SwapMatchTeamsRequest(BaseModel):
@@ -437,6 +445,8 @@ async def swap_bracket_teams(
         raise HTTPException(status_code=400, detail="swap_type must be swap_a, swap_b, or cross")
 
     await session.commit()
+    from src.utils.cache import invalidate as _invalidate_cache
+    await _invalidate_cache(f"tournament:{tournament_id}")
     return {
         "status": "swapped",
         "match_a": {"id": match_a.id, "team_a_id": match_a.team_a_id, "team_b_id": match_a.team_b_id},
@@ -452,6 +462,9 @@ async def generate_matches(
     user=Depends(get_current_user),
 ):
     matches = await TournamentStageService.generate_group_matches(session, tournament_id, stage_id)
+    # New fixtures are visible — kill the cached tournament detail.
+    from src.utils.cache import invalidate as _invalidate_cache
+    await _invalidate_cache(f"tournament:{tournament_id}")
     return {"matches_created": len(matches)}
 
 
@@ -460,7 +473,7 @@ async def get_stage_standings(
     tournament_id: int,
     stage_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     standings = await TournamentStageService.get_stage_standings(session, stage_id)
     return {"stage_id": stage_id, "groups": standings}
@@ -516,31 +529,6 @@ async def update_qualification_rule(
     await TournamentStageRepository.update_stage(session, stage_id, {"qualification_rule": rule})
     await session.commit()
     return {"stage_id": stage_id, "qualification_rule": rule}
-
-
-@router.post("/{tournament_id}/stages/{stage_id}/add-team")
-async def add_team_to_stage(
-    tournament_id: int,
-    stage_id: int,
-    req: AddTeamToStageRequest,
-    session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
-):
-    """Add a new team to a stage's group (mid-tournament team addition)."""
-    team_id = req.team_id
-    group_id = req.group_id
-
-    # Add team to tournament if not already
-    try:
-        from src.services.tournament_service import TournamentService
-        await TournamentService.add_team(session, tournament_id, team_id)
-    except Exception as e:
-        logger.warning(f"Add team {team_id} to tournament {tournament_id} skipped (may already exist): {e}")
-
-    # Add to group
-    await TournamentStageRepository.add_team_to_group(session, group_id, team_id)
-    await session.commit()
-    return {"status": "added", "team_id": team_id, "group_id": group_id}
 
 
 @router.delete("/{tournament_id}/stages/{stage_id}")

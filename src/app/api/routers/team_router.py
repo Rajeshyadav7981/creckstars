@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from starlette.requests import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
-from src.utils.security import get_current_user
+from src.utils.security import get_current_user, get_current_user_optional
 from src.services.team_service import TeamService
 from fastapi import HTTPException
 from src.app.api.routers.models.team_model import CreateTeamRequest, AddPlayerToTeamRequest, UpdatePlayerRoleRequest
@@ -37,7 +37,7 @@ async def list_teams(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     teams = await TeamService.get_teams(session, created_by=created_by, search=search, code=code, lat=lat, lng=lng, limit=limit, offset=offset)
     return [{"id": t.id, "team_code": t.team_code, "name": t.name, "short_name": t.short_name, "color": t.color, "city": t.city, "created_by": t.created_by} for t in teams]
@@ -47,7 +47,7 @@ async def list_teams(
 async def get_team(
     team_id: int,
     session: AsyncSession = Depends(get_async_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_optional),
 ):
     return await TeamService.get_team_detail(session, team_id)
 
