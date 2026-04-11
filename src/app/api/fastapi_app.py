@@ -3,6 +3,7 @@ import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -205,8 +206,102 @@ from src.app.api.config import APK_DIR
 os.makedirs(APK_DIR, exist_ok=True)
 
 
-@app.get("/")
-def root():
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Landing page — shareable link to download the app."""
+    from fastapi.responses import HTMLResponse
+    from src.app.api.config import get_app_version_info
+    info = get_app_version_info()
+    v = info["latest_version"]
+    notes = info["release_notes"]
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CrecKStars · Cricket Scoring App</title>
+<meta name="description" content="Score live cricket matches ball-by-ball, organize tournaments, build teams, and connect with the cricket community."/>
+<meta property="og:title" content="CrecKStars · Cricket Scoring App"/>
+<meta property="og:description" content="Score live matches, organize tournaments, track your stats."/>
+<meta property="og:type" content="website"/>
+<meta property="og:site_name" content="CrecKStars"/>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0D0D0D;color:#fff;min-height:100vh}}
+.hero{{text-align:center;padding:60px 24px 40px;background:linear-gradient(180deg,#0A1628 0%,#0D0D0D 100%)}}
+.logo{{width:100px;height:100px;border-radius:28px;background:linear-gradient(135deg,#1E88E5,#42A5F5);margin:0 auto 24px;display:flex;align-items:center;justify-content:center;font-size:52px;box-shadow:0 12px 40px rgba(30,136,229,0.4)}}
+h1{{font-size:36px;font-weight:900;letter-spacing:-1px;margin-bottom:8px}}
+h1 span{{color:#1E88E5}}
+.tagline{{font-size:16px;color:#777;font-weight:500;margin-bottom:32px}}
+.dl-btn{{display:inline-block;background:#1E88E5;color:#fff;font-size:17px;font-weight:700;padding:16px 48px;border-radius:14px;text-decoration:none;box-shadow:0 8px 24px rgba(30,136,229,0.4);transition:transform .15s}}
+.dl-btn:hover{{transform:translateY(-2px)}}
+.ver{{display:inline-block;margin-top:14px;font-size:12px;color:#555;background:#1A1A1A;padding:5px 14px;border-radius:20px;border:1px solid #2C2C2C}}
+
+.features{{max-width:600px;margin:0 auto;padding:40px 24px}}
+.features h2{{font-size:20px;font-weight:800;margin-bottom:24px;text-align:center;color:#B0B0B0}}
+.feat{{display:flex;gap:16px;align-items:flex-start;margin-bottom:20px;background:#1A1A1A;padding:16px;border-radius:14px;border:1px solid #2C2C2C}}
+.feat .ic{{width:44px;height:44px;border-radius:12px;background:rgba(30,136,229,0.15);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}}
+.feat h3{{font-size:14px;font-weight:700;color:#fff;margin-bottom:4px}}
+.feat p{{font-size:12px;color:#777;line-height:1.4}}
+
+.notes{{max-width:600px;margin:0 auto;padding:0 24px 20px}}
+.notes-card{{background:#1A1A1A;border:1px solid #2C2C2C;border-radius:14px;padding:16px}}
+.notes-card h3{{font-size:13px;font-weight:700;color:#555;margin-bottom:8px;text-transform:uppercase;letter-spacing:1px}}
+.notes-card p{{font-size:13px;color:#777;line-height:1.5}}
+
+.footer{{text-align:center;padding:40px 24px;font-size:11px;color:#333}}
+.footer a{{color:#1E88E5;text-decoration:none}}
+</style>
+</head>
+<body>
+<div class="hero">
+  <div class="logo">&#127951;</div>
+  <h1>Crec<span>K</span>Stars</h1>
+  <p class="tagline">Score · Track · Win</p>
+  <a href="/download/latest" class="dl-btn">Download APK</a>
+  <br/>
+  <span class="ver">v{v} · Latest</span>
+</div>
+
+<div class="features">
+  <h2>Everything you need for cricket</h2>
+  <div class="feat">
+    <div class="ic">&#127951;</div>
+    <div><h3>Live Ball-by-Ball Scoring</h3><p>Score matches in real-time with detailed ball tracking, extras, wickets, and automatic run rate calculation.</p></div>
+  </div>
+  <div class="feat">
+    <div class="ic">&#127942;</div>
+    <div><h3>Tournament Management</h3><p>Create league + knockout tournaments. Multi-group round-robin, auto-progression, standings, and leaderboards.</p></div>
+  </div>
+  <div class="feat">
+    <div class="ic">&#128101;</div>
+    <div><h3>Teams & Players</h3><p>Build squads, track player career stats across tournaments, batting and bowling averages.</p></div>
+  </div>
+  <div class="feat">
+    <div class="ic">&#128172;</div>
+    <div><h3>Community</h3><p>Share posts, create polls, discuss matches with the cricket community. Trending hashtags and feeds.</p></div>
+  </div>
+  <div class="feat">
+    <div class="ic">&#128202;</div>
+    <div><h3>Stats & Leaderboards</h3><p>Orange Cap, Purple Cap, NRR standings, best bowling figures — all computed automatically.</p></div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="notes-card">
+    <h3>What's New in v{v}</h3>
+    <p>{notes}</p>
+  </div>
+</div>
+
+<div class="footer">
+  CrecKStars &copy; 2025 &middot; <a href="/health">API Status</a> &middot; <a href="/api/app/version">Version API</a>
+</div>
+</body>
+</html>""")
+
+@app.get("/api")
+def api_root():
     return {"message": "CreckStars API is running"}
 
 
