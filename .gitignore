@@ -23,7 +23,6 @@ htmlcov/
 uploads/
 
 # Releases (APK files — too large for git)
-releases/*.apk
 
 # Dev/test scripts (not production code)
 seed_data.py
