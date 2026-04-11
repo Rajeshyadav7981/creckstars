@@ -214,103 +214,332 @@ async def root():
     info = get_app_version_info()
     v = info["latest_version"]
     notes = info["release_notes"]
+    short_note = notes.split('.')[0] if '.' in notes else notes
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>CrecKStars</title>
-<meta name="description" content="Live cricket scoring, tournaments, teams & community"/>
-<meta property="og:title" content="CrecKStars"/>
-<meta property="og:description" content="Score live matches, organize tournaments, track your stats."/>
+<title>CrecKStars &mdash; Live Cricket Scoring &amp; Tournaments</title>
+<meta name="description" content="CrecKStars is the all-in-one cricket app for live ball-by-ball scoring, tournament management, team stats, leaderboards and community. Free Android app."/>
+<meta name="theme-color" content="#ffffff"/>
+<meta property="og:title" content="CrecKStars &mdash; Live Cricket Scoring"/>
+<meta property="og:description" content="Score live matches, run tournaments, track every run & wicket."/>
 <meta property="og:type" content="website"/>
 <meta property="og:site_name" content="CrecKStars"/>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#000;color:#fff;min-height:100vh;overflow-x:hidden}}
+html{{scroll-behavior:smooth}}
+body{{font-family:'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F7F9FC;color:#0F172A;min-height:100vh;overflow-x:hidden;-webkit-font-smoothing:antialiased}}
 
-.page{{max-width:420px;margin:0 auto;padding:0 20px}}
+.wrap{{max-width:1080px;margin:0 auto;padding:0 24px}}
+
+/* Nav */
+.nav{{display:flex;align-items:center;justify-content:space-between;padding:22px 0}}
+.brand{{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800;letter-spacing:-.3px;color:#0F172A;text-decoration:none}}
+.brand .mark{{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#1E88E5 0%,#42A5F5 100%);display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 6px 18px rgba(30,136,229,.25)}}
+.brand span{{color:#1E88E5}}
+.nav .links{{display:flex;gap:28px;font-size:14px;font-weight:500}}
+.nav .links a{{color:#475569;text-decoration:none;transition:color .15s}}
+.nav .links a:hover{{color:#1E88E5}}
+.nav .cta{{background:#1E88E5;color:#fff;padding:9px 18px;border-radius:100px;font-size:13px;font-weight:700;text-decoration:none;box-shadow:0 4px 14px rgba(30,136,229,.3);transition:transform .15s}}
+.nav .cta:hover{{transform:translateY(-1px)}}
+@media(max-width:720px){{.nav .links{{display:none}}}}
 
 /* Hero */
-.hero{{padding:72px 0 48px;text-align:center;position:relative}}
-.hero::before{{content:'';position:absolute;top:-40px;left:50%;transform:translateX(-50%);width:300px;height:300px;background:radial-gradient(circle,rgba(30,136,229,0.12) 0%,transparent 70%);pointer-events:none}}
-.logo{{width:72px;height:72px;border-radius:18px;background:#1E88E5;margin:0 auto 20px;display:flex;align-items:center;justify-content:center;font-size:36px}}
-.name{{font-size:28px;font-weight:800;letter-spacing:-.5px}}
-.name span{{color:#1E88E5}}
-.tag{{font-size:14px;color:#666;margin-top:6px;font-weight:500;letter-spacing:.5px}}
+.hero{{padding:60px 0 80px;text-align:center;position:relative}}
+.hero::before{{content:'';position:absolute;top:0;left:50%;transform:translateX(-50%);width:720px;height:480px;background:radial-gradient(ellipse at center,rgba(30,136,229,.10) 0%,transparent 60%);pointer-events:none;z-index:0}}
+.hero > *{{position:relative;z-index:1}}
+.badge{{display:inline-flex;align-items:center;gap:8px;background:#fff;border:1px solid #E2E8F0;color:#1E88E5;font-size:12px;font-weight:700;padding:8px 16px;border-radius:100px;margin-bottom:24px;box-shadow:0 4px 12px rgba(15,23,42,.04)}}
+.badge .dot{{width:6px;height:6px;border-radius:50%;background:#22C55E;box-shadow:0 0 0 3px rgba(34,197,94,.2)}}
+.hero h1{{font-size:52px;font-weight:800;letter-spacing:-1.5px;line-height:1.05;color:#0F172A;margin-bottom:20px}}
+.hero h1 .hl{{color:#1E88E5}}
+.hero p.sub{{font-size:18px;color:#475569;max-width:600px;margin:0 auto 36px;line-height:1.6}}
+.hero .ctas{{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}}
+.hero .btn-primary{{display:inline-flex;align-items:center;gap:10px;background:#1E88E5;color:#fff;font-size:15px;font-weight:700;padding:16px 32px;border-radius:100px;text-decoration:none;box-shadow:0 10px 30px rgba(30,136,229,.35);transition:all .2s}}
+.hero .btn-primary:hover{{background:#1976D2;transform:translateY(-2px);box-shadow:0 14px 36px rgba(30,136,229,.4)}}
+.hero .btn-primary svg{{width:20px;height:20px;fill:#fff}}
+.hero .btn-secondary{{display:inline-flex;align-items:center;gap:8px;background:#fff;color:#0F172A;font-size:14px;font-weight:600;padding:16px 24px;border-radius:100px;text-decoration:none;border:1px solid #E2E8F0;transition:all .2s}}
+.hero .btn-secondary:hover{{border-color:#1E88E5;color:#1E88E5}}
+.hero .meta{{margin-top:20px;font-size:12px;color:#64748B;font-weight:500}}
+.hero .meta b{{color:#0F172A}}
+@media(max-width:720px){{.hero h1{{font-size:36px}}.hero p.sub{{font-size:16px}}}}
 
-/* Download */
-.dl{{margin:36px 0 0;text-align:center}}
-.dl a{{display:inline-flex;align-items:center;gap:10px;background:#1E88E5;color:#fff;font-size:15px;font-weight:700;padding:14px 36px;border-radius:50px;text-decoration:none;transition:all .2s}}
-.dl a:hover{{background:#1976D2;transform:scale(1.02)}}
-.dl a svg{{width:20px;height:20px;fill:#fff}}
-.dl .v{{display:block;margin-top:12px;font-size:11px;color:#444;font-weight:600;letter-spacing:.5px}}
+/* Stat strip */
+.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:0 0 80px}}
+.stat{{background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:24px 16px;text-align:center;box-shadow:0 4px 12px rgba(15,23,42,.03)}}
+.stat .n{{font-size:28px;font-weight:800;color:#0F172A;letter-spacing:-.5px}}
+.stat .n span{{color:#1E88E5}}
+.stat .l{{font-size:11px;color:#64748B;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-top:6px}}
+@media(max-width:720px){{.stats{{grid-template-columns:repeat(2,1fr)}}}}
 
-/* Stats strip */
-.stats{{display:flex;gap:0;margin:40px 0 0;border-radius:14px;overflow:hidden;border:1px solid #1a1a1a}}
-.stat{{flex:1;padding:16px 8px;text-align:center;background:#0a0a0a}}
-.stat+.stat{{border-left:1px solid #1a1a1a}}
-.stat .n{{font-size:20px;font-weight:800;color:#fff}}
-.stat .l{{font-size:9px;color:#555;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-top:4px}}
+/* Section heads */
+.sec{{margin:0 0 80px}}
+.sec-head{{text-align:center;margin-bottom:48px}}
+.sec-head .eyebrow{{display:inline-block;font-size:12px;font-weight:700;color:#1E88E5;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:12px}}
+.sec-head h2{{font-size:36px;font-weight:800;color:#0F172A;letter-spacing:-1px;line-height:1.15}}
+.sec-head p{{font-size:16px;color:#64748B;margin-top:12px;max-width:560px;margin-left:auto;margin-right:auto;line-height:1.6}}
+@media(max-width:720px){{.sec-head h2{{font-size:28px}}}}
 
-/* Features */
-.feats{{margin:40px 0 0}}
-.feats h2{{font-size:11px;font-weight:700;color:#444;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:16px}}
-.f{{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid #111}}
-.f:last-child{{border-bottom:none}}
-.f .ic{{width:36px;height:36px;border-radius:10px;background:#111;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}}
-.f .t{{font-size:13px;font-weight:600;color:#ccc}}
-.f .d{{font-size:11px;color:#555;margin-top:2px}}
+/* Features grid */
+.feats{{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}}
+.f{{background:#fff;border:1px solid #E2E8F0;border-radius:18px;padding:28px 24px;transition:all .2s}}
+.f:hover{{border-color:#1E88E5;transform:translateY(-4px);box-shadow:0 20px 40px rgba(15,23,42,.08)}}
+.f .ic{{width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,#E3F2FD 0%,#BBDEFB 100%);display:flex;align-items:center;justify-content:center;font-size:22px;margin-bottom:18px}}
+.f .t{{font-size:17px;font-weight:700;color:#0F172A;margin-bottom:8px}}
+.f .d{{font-size:14px;color:#64748B;line-height:1.6}}
+@media(max-width:900px){{.feats{{grid-template-columns:repeat(2,1fr)}}}}
+@media(max-width:600px){{.feats{{grid-template-columns:1fr}}}}
 
-/* What's new */
-.new{{margin:32px 0 0;padding:16px;background:#0a0a0a;border-radius:12px;border:1px solid #1a1a1a}}
-.new h3{{font-size:10px;font-weight:700;color:#1E88E5;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:8px}}
-.new p{{font-size:12px;color:#555;line-height:1.5}}
+/* How it works */
+.steps{{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;position:relative}}
+.step{{background:#fff;border:1px solid #E2E8F0;border-radius:18px;padding:32px 24px;text-align:center;position:relative}}
+.step .num{{width:44px;height:44px;border-radius:50%;background:#1E88E5;color:#fff;font-size:18px;font-weight:800;display:flex;align-items:center;justify-content:center;margin:0 auto 18px;box-shadow:0 8px 20px rgba(30,136,229,.3)}}
+.step .t{{font-size:17px;font-weight:700;color:#0F172A;margin-bottom:8px}}
+.step .d{{font-size:14px;color:#64748B;line-height:1.6}}
+@media(max-width:720px){{.steps{{grid-template-columns:1fr}}}}
+
+/* Who's it for */
+.who{{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}}
+.who .w{{background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:24px 18px;text-align:center}}
+.who .w .ic{{font-size:32px;margin-bottom:10px}}
+.who .w .t{{font-size:14px;font-weight:700;color:#0F172A}}
+.who .w .d{{font-size:12px;color:#64748B;margin-top:4px;line-height:1.5}}
+@media(max-width:720px){{.who{{grid-template-columns:repeat(2,1fr)}}}}
+
+/* FAQ */
+.faq{{max-width:720px;margin:0 auto}}
+.q{{background:#fff;border:1px solid #E2E8F0;border-radius:14px;padding:20px 24px;margin-bottom:12px}}
+.q .t{{font-size:15px;font-weight:700;color:#0F172A;margin-bottom:6px}}
+.q .a{{font-size:14px;color:#64748B;line-height:1.6}}
+
+/* What's new card */
+.new{{background:linear-gradient(135deg,#1E88E5 0%,#1565C0 100%);border-radius:22px;padding:40px 32px;color:#fff;text-align:center;box-shadow:0 20px 50px rgba(30,136,229,.25);margin-bottom:80px}}
+.new .tag{{display:inline-block;background:rgba(255,255,255,.2);font-size:11px;font-weight:700;padding:6px 14px;border-radius:100px;text-transform:uppercase;letter-spacing:1px;margin-bottom:14px}}
+.new h3{{font-size:24px;font-weight:800;margin-bottom:10px;letter-spacing:-.3px}}
+.new p{{font-size:15px;opacity:.9;max-width:520px;margin:0 auto 22px;line-height:1.6}}
+.new a{{display:inline-flex;align-items:center;gap:8px;background:#fff;color:#1E88E5;font-size:14px;font-weight:700;padding:12px 26px;border-radius:100px;text-decoration:none;transition:transform .15s}}
+.new a:hover{{transform:translateY(-1px)}}
 
 /* Footer */
-.foot{{text-align:center;padding:48px 0 32px;font-size:10px;color:#333}}
+.foot{{border-top:1px solid #E2E8F0;padding:40px 0;text-align:center}}
+.foot .brand-sm{{font-size:14px;font-weight:700;color:#0F172A;margin-bottom:6px}}
+.foot .brand-sm span{{color:#1E88E5}}
+.foot .copy{{font-size:12px;color:#94A3B8}}
+.foot .links{{margin-top:14px;display:flex;gap:24px;justify-content:center;font-size:12px}}
+.foot .links a{{color:#64748B;text-decoration:none}}
+.foot .links a:hover{{color:#1E88E5}}
 </style>
 </head>
 <body>
-<div class="page">
 
-<div class="hero">
-  <div class="logo">&#127951;</div>
-  <div class="name">Crec<span>K</span>Stars</div>
-  <div class="tag">Score &middot; Track &middot; Win</div>
+<!-- Nav -->
+<div class="wrap">
+  <nav class="nav">
+    <a href="/" class="brand"><div class="mark">&#127951;</div>Crec<span>K</span>Stars</a>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#who">Who it's for</a>
+      <a href="#faq">FAQ</a>
+    </div>
+    <a href="/download/latest" class="cta">Download</a>
+  </nav>
 </div>
 
-<div class="dl">
-  <a href="/download/latest">
-    <svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zm7-18l-7 7h4v6h6v-6h4l-7-7z"/></svg>
-    Download v{v}
-  </a>
-  <span class="v">Android &middot; {notes.split('.')[0] if '.' in notes else notes}</span>
+<!-- Hero -->
+<div class="wrap">
+  <section class="hero">
+    <div class="badge"><span class="dot"></span>Version {v} &middot; Now Live</div>
+    <h1>Your cricket match.<br/><span class="hl">Tracked ball-by-ball.</span></h1>
+    <p class="sub">Score live matches, run full tournaments, and keep every stat of every player &mdash; all in one beautifully simple app. Built for gully cricket, club leagues and serious tournaments.</p>
+    <div class="ctas">
+      <a href="/download/latest" class="btn-primary">
+        <svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zm7-18l-7 7h4v6h6v-6h4l-7-7z"/></svg>
+        Download for Android
+      </a>
+      <a href="#features" class="btn-secondary">See features &rarr;</a>
+    </div>
+    <div class="meta">Free &middot; <b>Android APK</b> &middot; {short_note}</div>
+  </section>
 </div>
 
-<div class="stats">
-  <div class="stat"><div class="n">&#127951;</div><div class="l">Live Scoring</div></div>
-  <div class="stat"><div class="n">&#127942;</div><div class="l">Tournaments</div></div>
-  <div class="stat"><div class="n">&#128202;</div><div class="l">Stats</div></div>
+<!-- Stats -->
+<div class="wrap">
+  <div class="stats">
+    <div class="stat"><div class="n">&#127951;</div><div class="l">Live Scoring</div></div>
+    <div class="stat"><div class="n">&#127942;</div><div class="l">Tournaments</div></div>
+    <div class="stat"><div class="n">&#128200;</div><div class="l">Player Stats</div></div>
+    <div class="stat"><div class="n">&#128101;</div><div class="l">Community</div></div>
+  </div>
 </div>
 
-<div class="feats">
-  <h2>Features</h2>
-  <div class="f"><div class="ic">&#127951;</div><div><div class="t">Ball-by-Ball Scoring</div><div class="d">Real-time scoring with extras, wickets & run rates</div></div></div>
-  <div class="f"><div class="ic">&#127942;</div><div><div class="t">Tournaments</div><div class="d">League + knockout with auto-progression & standings</div></div></div>
-  <div class="f"><div class="ic">&#128101;</div><div><div class="t">Teams & Squads</div><div class="d">Build teams, track player career stats</div></div></div>
-  <div class="f"><div class="ic">&#128172;</div><div><div class="t">Community</div><div class="d">Posts, polls & cricket discussions</div></div></div>
-  <div class="f"><div class="ic">&#128202;</div><div><div class="t">Leaderboards</div><div class="d">Orange Cap, Purple Cap, NRR & more</div></div></div>
+<!-- Features -->
+<div class="wrap">
+  <section class="sec" id="features">
+    <div class="sec-head">
+      <span class="eyebrow">Features</span>
+      <h2>Everything you need for cricket</h2>
+      <p>From the first ball to the trophy lift &mdash; CrecKStars handles scoring, stats, standings and everything in between.</p>
+    </div>
+    <div class="feats">
+      <div class="f">
+        <div class="ic">&#127951;</div>
+        <div class="t">Ball-by-Ball Scoring</div>
+        <div class="d">Tap to score every delivery. Wides, no-balls, byes, leg-byes, wickets &mdash; all dismissal types supported with full cricket rules.</div>
+      </div>
+      <div class="f">
+        <div class="ic">&#127942;</div>
+        <div class="t">Tournaments</div>
+        <div class="d">Run league stages, knockouts or hybrid formats. Auto-progression, group standings, points table and NRR calculated automatically.</div>
+      </div>
+      <div class="f">
+        <div class="ic">&#128101;</div>
+        <div class="t">Teams &amp; Squads</div>
+        <div class="d">Create teams, manage squads, invite players. Career stats follow each player across every match they play.</div>
+      </div>
+      <div class="f">
+        <div class="ic">&#128202;</div>
+        <div class="t">Full Scorecards</div>
+        <div class="d">Batting card, bowling figures, fall of wickets, partnerships, manhattan and worm graphs &mdash; the whole match, saved.</div>
+      </div>
+      <div class="f">
+        <div class="ic">&#127942;</div>
+        <div class="t">Leaderboards</div>
+        <div class="d">Orange Cap (runs), Purple Cap (wickets), strike rate, economy, best bowling, best batting &mdash; tournament-wide rankings live.</div>
+      </div>
+      <div class="f">
+        <div class="ic">&#128172;</div>
+        <div class="t">Community</div>
+        <div class="d">Share match highlights, post polls, follow friends and discuss the game. Built-in cricket social feed.</div>
+      </div>
+      <div class="f">
+        <div class="ic">&#128225;</div>
+        <div class="t">Live Updates</div>
+        <div class="d">Real-time score sync via WebSocket. Everyone watching sees the same ball at the same time &mdash; no refresh needed.</div>
+      </div>
+      <div class="f">
+        <div class="ic">&#128190;</div>
+        <div class="t">Offline Scoring</div>
+        <div class="d">Lost network? Keep scoring. Changes sync automatically when you&rsquo;re back online. Never miss a ball.</div>
+      </div>
+      <div class="f">
+        <div class="ic">&#128274;</div>
+        <div class="t">Secure &amp; Private</div>
+        <div class="d">Encrypted connections (HTTPS), secure login with OTP, your data stays yours. No ads, no tracking.</div>
+      </div>
+    </div>
+  </section>
 </div>
 
-<div class="new">
-  <h3>v{v}</h3>
-  <p>{notes}</p>
+<!-- How it works -->
+<div class="wrap">
+  <section class="sec" id="how">
+    <div class="sec-head">
+      <span class="eyebrow">How it works</span>
+      <h2>Start scoring in 3 steps</h2>
+      <p>From install to live scoring in under 2 minutes.</p>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="num">1</div>
+        <div class="t">Download &amp; Sign up</div>
+        <div class="d">Install the APK, verify your phone with OTP, and you&rsquo;re in &mdash; free forever, no credit card.</div>
+      </div>
+      <div class="step">
+        <div class="num">2</div>
+        <div class="t">Create your match</div>
+        <div class="d">Pick teams, set overs, choose format (T20, ODI, custom). Add players from your saved squads or create new ones.</div>
+      </div>
+      <div class="step">
+        <div class="num">3</div>
+        <div class="t">Score live</div>
+        <div class="d">Tap each delivery. Friends watch the match live on their phones. Scorecard &amp; stats update instantly.</div>
+      </div>
+    </div>
+  </section>
 </div>
 
-<div class="foot">CrecKStars &copy; 2025</div>
-
+<!-- Who it's for -->
+<div class="wrap">
+  <section class="sec" id="who">
+    <div class="sec-head">
+      <span class="eyebrow">Built for</span>
+      <h2>Made for every cricketer</h2>
+      <p>Whether it&rsquo;s a weekend gully match or a 30-team inter-society tournament &mdash; CrecKStars scales with you.</p>
+    </div>
+    <div class="who">
+      <div class="w"><div class="ic">&#127968;</div><div class="t">Gully Cricket</div><div class="d">Score your weekend friends&rsquo; match</div></div>
+      <div class="w"><div class="ic">&#127942;</div><div class="t">Club Leagues</div><div class="d">Full season, points table, NRR</div></div>
+      <div class="w"><div class="ic">&#127979;</div><div class="t">Schools &amp; Colleges</div><div class="d">Inter-house &amp; campus tournaments</div></div>
+      <div class="w"><div class="ic">&#127959;</div><div class="t">Corporate Leagues</div><div class="d">Office and society matches</div></div>
+    </div>
+  </section>
 </div>
+
+<!-- FAQ -->
+<div class="wrap">
+  <section class="sec" id="faq">
+    <div class="sec-head">
+      <span class="eyebrow">FAQ</span>
+      <h2>Common questions</h2>
+    </div>
+    <div class="faq">
+      <div class="q">
+        <div class="t">Is CrecKStars free?</div>
+        <div class="a">Yes &mdash; completely free. No ads, no subscriptions, no hidden costs.</div>
+      </div>
+      <div class="q">
+        <div class="t">Is it available on iOS?</div>
+        <div class="a">Currently Android only. iOS version is on the roadmap &mdash; stay tuned.</div>
+      </div>
+      <div class="q">
+        <div class="t">Do I need the internet to score?</div>
+        <div class="a">No. Scoring works offline &mdash; everything syncs the moment you reconnect. Perfect for grounds with poor signal.</div>
+      </div>
+      <div class="q">
+        <div class="t">Can I run a full tournament?</div>
+        <div class="a">Absolutely. Create tournaments with league stages, groups, knockouts, automatic standings, NRR, Orange Cap and Purple Cap rankings.</div>
+      </div>
+      <div class="q">
+        <div class="t">Is my data safe?</div>
+        <div class="a">Yes. All connections use HTTPS encryption. Your account is protected by OTP verification, and we never sell your data.</div>
+      </div>
+      <div class="q">
+        <div class="t">How do I install the APK?</div>
+        <div class="a">Tap Download, allow installs from unknown sources (Settings &rarr; Security), then open the downloaded file. Takes under 30 seconds.</div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- What's new CTA -->
+<div class="wrap">
+  <div class="new">
+    <div class="tag">What&rsquo;s new</div>
+    <h3>Version {v} is here</h3>
+    <p>{notes}</p>
+    <a href="/download/latest">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="#1E88E5"><path d="M5 20h14v-2H5v2zm7-18l-7 7h4v6h6v-6h4l-7-7z"/></svg>
+      Download v{v}
+    </a>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="wrap">
+  <footer class="foot">
+    <div class="brand-sm">Crec<span>K</span>Stars</div>
+    <div class="copy">&copy; 2026 CrecKStars &middot; Score &middot; Track &middot; Win</div>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#faq">FAQ</a>
+      <a href="/download/latest">Download</a>
+    </div>
+  </footer>
+</div>
+
 </body>
 </html>""")
 
