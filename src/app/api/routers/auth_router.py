@@ -202,9 +202,32 @@ async def send_otp(
         "expires_at": expires_at,
     })
 
-    # TODO: Send via SMS provider (Twilio, MSG91, etc.)
-    # For now, log to console for testing
-    print(f"[OTP] {mobile}: {otp_code} (purpose: {data.purpose})")
+    # Send OTP via Fast2SMS
+    from src.app.api.config import FAST2SMS_API_KEY
+    import httpx
+
+    if FAST2SMS_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://www.fast2sms.com/dev/bulkV2",
+                    params={
+                        "authorization": FAST2SMS_API_KEY,
+                        "variables_values": otp_code,
+                        "route": "otp",
+                        "numbers": mobile,
+                    },
+                )
+                result = resp.json()
+                if not result.get("return"):
+                    print(f"[OTP] Fast2SMS error: {result.get('message')}")
+                    raise HTTPException(status_code=500, detail="Failed to send OTP. Try again.")
+        except httpx.HTTPError as e:
+            print(f"[OTP] Fast2SMS request failed: {e}")
+            raise HTTPException(status_code=500, detail="SMS service unavailable. Try again.")
+    else:
+        # Fallback for local dev — log to console
+        print(f"[OTP] {mobile}: {otp_code} (purpose: {data.purpose})")
 
     return {"message": "OTP sent", "expires_in": 300}
 
