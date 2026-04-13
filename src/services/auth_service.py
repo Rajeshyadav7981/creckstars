@@ -40,7 +40,7 @@ class AuthService:
         profile: str | None = None,
         username: str | None = None,
     ) -> dict:
-        """Register user. OTP already verified by Firebase on frontend."""
+        """Register user. OTP must be verified before calling this."""
         # Check duplicates
         if email and await UserRepository.get_by_email(session, email):
             raise HTTPException(
@@ -165,7 +165,7 @@ class AuthService:
         mobile: str,
         password: str,
     ) -> dict:
-        """Login with password. OTP already verified by Firebase on frontend."""
+        """Login with password. OTP must be verified before calling this."""
         user = await UserRepository.get_by_mobile(session, mobile)
         if not user:
             logger.info("Login failed: user not found", extra={"extra_data": {

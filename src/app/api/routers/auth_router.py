@@ -32,7 +32,7 @@ async def register(
     data: RegisterRequest,
     session: AsyncSession = Depends(get_async_db),
 ):
-    """Register user. OTP verified by Firebase on frontend."""
+    """Register user. OTP must be verified before calling this endpoint."""
     return await AuthService.register(
         session=session,
         first_name=data.first_name,
@@ -52,7 +52,7 @@ async def login(
     data: LoginRequest,
     session: AsyncSession = Depends(get_async_db),
 ):
-    """Login with password. OTP verified by Firebase on frontend."""
+    """Login with password. OTP must be verified before calling this endpoint."""
     return await AuthService.login(
         session=session,
         mobile=data.mobile,

@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, Query
+import os
+import uuid
+
+from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException
 from starlette.requests import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
@@ -11,7 +14,56 @@ from src.app.api.routers.models.community_model import (
 from src.app.api.rate_limiter import limiter
 from src.app.api.config import RATE_LIMITS
 
+UPLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))), "uploads")
+ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+
 router = APIRouter(prefix="/api/community", tags=["Community"])
+
+
+# ── Image Upload ──
+
+@router.post("/upload-image")
+@limiter.limit("10/minute")
+async def upload_community_image(
+    request: Request,
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+):
+    """Upload an image for a community post. Returns the image URL."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_IMAGE_EXT:
+        raise HTTPException(status_code=400, detail="File type not allowed. Use JPG, PNG, GIF, or WebP.")
+
+    content = await file.read()
+    if len(content) > MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large. Max 10 MB.")
+
+    # Compress if needed
+    try:
+        from PIL import Image as PILImage
+        import io
+        img = PILImage.open(io.BytesIO(content))
+        img = img.convert("RGB")
+        if img.width > 1024:
+            ratio = 1024 / img.width
+            img = img.resize((1024, int(img.height * ratio)), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=75, optimize=True)
+        content = buf.getvalue()
+        ext = ".jpg"
+    except Exception:
+        pass
+
+    community_dir = os.path.join(UPLOADS_DIR, "community")
+    os.makedirs(community_dir, exist_ok=True)
+    filename = f"{user.id}_{uuid.uuid4().hex[:8]}{ext}"
+    filepath = os.path.join(community_dir, filename)
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    image_url = f"/uploads/community/{filename}"
+    return {"image_url": image_url}
 
 
 # ── Posts ──
