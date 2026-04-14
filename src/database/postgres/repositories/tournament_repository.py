@@ -40,7 +40,7 @@ class TournamentRepository:
     @staticmethod
     async def get_all(
         session: AsyncSession, status: str = None, created_by: int = None,
-        search: str = None, for_user: int = None,
+        search: str = None, for_user: int = None, role: str = None,
         limit: int = 50, offset: int = 0,
     ) -> list:
         """List tournaments. When `for_user` is set, returns tournaments the
@@ -73,10 +73,20 @@ class TournamentRepository:
                 else_=literal_column("'played'"),
             ).label('role')
 
+            # Apply role filter server-side (before LIMIT/OFFSET)
+            if role == 'played':
+                where_clause = played_exists
+            elif role == 'organized':
+                where_clause = is_org
+            elif role == 'both':
+                where_clause = and_(is_org, played_exists)
+            else:
+                where_clause = or_(is_org, played_exists)
+
             query = (
                 select(TournamentSchema, role_expr)
                 .options(load_only(*TournamentRepository._LIST_COLS))
-                .where(or_(is_org, played_exists))
+                .where(where_clause)
             )
             if status:
                 query = query.where(TournamentSchema.status == status)

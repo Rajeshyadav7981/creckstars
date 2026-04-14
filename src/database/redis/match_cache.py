@@ -115,6 +115,28 @@ class MatchCache:
         except Exception as e:
             logger.warning(f"Redis operation failed: {e}")
 
+    # --- Squad cache ---
+
+    @staticmethod
+    async def get_squad(match_id: int, team_id: int):
+        try:
+            r = await MatchCache._get_redis()
+            key = f"match:{match_id}:squad:{team_id}"
+            data = await r.get(key)
+            return json.loads(data) if data else None
+        except Exception as e:
+            logger.warning(f"Redis operation failed: {e}")
+            return None
+
+    @staticmethod
+    async def set_squad(match_id: int, team_id: int, data: list, ttl: int = 300):
+        try:
+            r = await MatchCache._get_redis()
+            key = f"match:{match_id}:squad:{team_id}"
+            await r.set(key, json.dumps(data, default=str), ex=ttl)
+        except Exception as e:
+            logger.warning(f"Redis operation failed: {e}")
+
     # --- Pub/Sub ---
 
     @staticmethod
@@ -163,6 +185,10 @@ class MatchCache:
                 f"match:{match_id}:current_over",
                 f"cache:match_detail:{match_id}",
             ]
+            # Also invalidate squad cache
+            squad_keys = await r.keys(f"match:{match_id}:squad:*")
+            if squad_keys:
+                keys.extend(squad_keys)
             # Also invalidate commentary cache
             comm_keys = await r.keys(f"cache:comm:{match_id}:*")
             if comm_keys:

@@ -62,6 +62,8 @@ async def create_tournament(
         entry_fee=req.entry_fee, prize_pool=req.prize_pool,
         banner_url=req.banner_url, **extra,
     )
+    from src.app.api.routers.user_router import invalidate_user_stats
+    await invalidate_user_stats(user.id)
     return {"id": t.id, "tournament_code": t.tournament_code, "name": t.name, "status": t.status, "tournament_type": t.tournament_type}
 
 
@@ -72,6 +74,7 @@ async def list_tournaments(
     status: str = Query(None),
     created_by: int = Query(None, description="Filter by creator user ID"),
     for_user: int = Query(None, description="Fetch tournaments created OR played by this user (returns role field)"),
+    role: str = Query(None, description="When for_user is set, filter to 'organized' or 'played' only"),
     search: str = Query(None, description="Search tournaments by name or code"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
@@ -81,7 +84,8 @@ async def list_tournaments(
     tournaments = await TournamentService.get_tournaments(
         session, status_filter=status,
         created_by=created_by if not for_user else None,
-        search=search, for_user=for_user, limit=limit, offset=offset,
+        search=search, for_user=for_user, role=role,
+        limit=limit, offset=offset,
     )
 
     # Lightweight per-tournament summary: stage count + match counts.
@@ -245,6 +249,17 @@ async def add_team_to_tournament(
     user=Depends(get_current_user),
 ):
     await TournamentService.add_team(session, tournament_id, req.team_id, user_id=user.id)
+    # Invalidate stats for all users with players on this team (played tournaments count changed)
+    from src.app.api.routers.user_router import invalidate_user_stats
+    from src.database.postgres.schemas.team_player_schema import TeamPlayerSchema as _TP
+    from src.database.postgres.schemas.player_schema import PlayerSchema as _PS
+    from sqlalchemy import select as _sel
+    res = await session.execute(
+        _sel(_PS.user_id).join(_TP, _TP.player_id == _PS.id)
+        .where(_TP.team_id == req.team_id, _PS.user_id.isnot(None))
+    )
+    for (uid,) in res.all():
+        await invalidate_user_stats(uid)
     return {"message": "Team added to tournament"}
 
 

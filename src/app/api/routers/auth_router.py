@@ -17,6 +17,9 @@ from src.app.api.routers.models.auth_model import (
     UpdateProfileRequest,
     UserResponse,
 )
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 UPLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))), "uploads")
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
@@ -42,6 +45,14 @@ async def register(
         password=data.password,
         profile=data.profile,
         username=data.username,
+        bio=data.bio,
+        city=data.city,
+        state_province=data.state_province,
+        country=data.country,
+        date_of_birth=data.date_of_birth,
+        batting_style=data.batting_style,
+        bowling_style=data.bowling_style,
+        player_role=data.player_role,
     )
 
 
@@ -202,32 +213,40 @@ async def send_otp(
         "expires_at": expires_at,
     })
 
-    # Send OTP via Fast2SMS
-    from src.app.api.config import FAST2SMS_API_KEY
+    # Send OTP via MSG91
+    from src.app.api.config import SMS_API_KEY, SMS_TEMPLATE_ID
     import httpx
 
-    if FAST2SMS_API_KEY:
+    if SMS_API_KEY:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    "https://www.fast2sms.com/dev/bulkV2",
-                    params={
-                        "authorization": FAST2SMS_API_KEY,
-                        "variables_values": otp_code,
-                        "route": "otp",
-                        "numbers": mobile,
+                resp = await client.post(
+                    "https://control.msg91.com/api/v5/otp",
+                    headers={
+                        "authkey": SMS_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "mobile": f"91{mobile}",
+                        "otp": otp_code,
+                        "otp_length": 6,
+                        "otp_expiry": 5,
+                        "template_id": SMS_TEMPLATE_ID,
                     },
                 )
                 result = resp.json()
-                if not result.get("return"):
-                    print(f"[OTP] Fast2SMS error: {result.get('message')}")
+                if result.get("type") == "error":
+                    logger.warning(f"[OTP] MSG91 error: {result.get('message')}")
                     raise HTTPException(status_code=500, detail="Failed to send OTP. Try again.")
+                logger.info(f"[OTP] SMS sent to {mobile} via MSG91")
         except httpx.HTTPError as e:
-            print(f"[OTP] Fast2SMS request failed: {e}")
+            logger.error(f"[OTP] MSG91 request failed: {e}")
             raise HTTPException(status_code=500, detail="SMS service unavailable. Try again.")
-    else:
-        # Fallback for local dev — log to console
-        print(f"[OTP] {mobile}: {otp_code} (purpose: {data.purpose})")
+
+    # Dev-only: log OTP code for local testing (never logged in production)
+    from src.app.api.config import ENVIRONMENT
+    if ENVIRONMENT != "production":
+        logger.info(f"[OTP-DEV] {mobile}: {otp_code} (purpose: {data.purpose})")
 
     return {"message": "OTP sent", "expires_in": 300}
 

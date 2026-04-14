@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from starlette.requests import Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
 from src.utils.security import get_current_user, get_current_user_optional
@@ -24,6 +25,8 @@ async def create_team(
         session, req.name, user.id, req.short_name, req.logo_url, req.color, req.home_ground,
         city=req.city, latitude=req.latitude, longitude=req.longitude,
     )
+    from src.app.api.routers.user_router import invalidate_user_stats
+    await invalidate_user_stats(user.id)
     return {"id": team.id, "team_code": team.team_code, "name": team.name, "short_name": team.short_name, "color": team.color, "city": team.city, "created_by": team.created_by}
 
 
@@ -61,6 +64,13 @@ async def add_player_to_team(
 ):
     await TeamService.add_player(session, team_id, req.player_id, req.jersey_number,
                                 req.is_captain, req.is_vice_captain, req.is_wicket_keeper, user_id=user.id)
+    # Invalidate stats for the player's linked user (teams count / played tournaments changed)
+    from src.app.api.routers.user_router import invalidate_user_stats
+    from src.database.postgres.schemas.player_schema import PlayerSchema as _PS
+    res = await session.execute(select(_PS.user_id).where(_PS.id == req.player_id))
+    uid = res.scalar_one_or_none()
+    if uid:
+        await invalidate_user_stats(uid)
     return {"message": "Player added to team"}
 
 

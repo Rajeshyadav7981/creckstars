@@ -23,6 +23,14 @@ def _user_response(user, token, refresh_token):
             "mobile": user.mobile,
             "email": user.email,
             "profile": user.profile,
+            "bio": getattr(user, 'bio', None),
+            "city": getattr(user, 'city', None),
+            "state_province": getattr(user, 'state_province', None),
+            "country": getattr(user, 'country', None),
+            "date_of_birth": str(user.date_of_birth) if getattr(user, 'date_of_birth', None) else None,
+            "batting_style": getattr(user, 'batting_style', None),
+            "bowling_style": getattr(user, 'bowling_style', None),
+            "player_role": getattr(user, 'player_role', None),
         },
     }
 
@@ -39,6 +47,14 @@ class AuthService:
         password: str,
         profile: str | None = None,
         username: str | None = None,
+        bio: str | None = None,
+        city: str | None = None,
+        state_province: str | None = None,
+        country: str | None = None,
+        date_of_birth=None,
+        batting_style: str | None = None,
+        bowling_style: str | None = None,
+        player_role: str | None = None,
     ) -> dict:
         """Register user. OTP must be verified before calling this."""
         # Check duplicates
@@ -80,6 +96,14 @@ class AuthService:
             "password": hash_password(password),
             "profile": profile,
             "username": username,
+            "bio": bio,
+            "city": city,
+            "state_province": state_province,
+            "country": country,
+            "date_of_birth": date_of_birth,
+            "batting_style": batting_style,
+            "bowling_style": bowling_style,
+            "player_role": player_role,
         })
 
         token = create_access_token(
@@ -110,6 +134,11 @@ class AuthService:
             update_data["email"] = data["email"]
         if "profile" in data:
             update_data["profile"] = data["profile"] or None
+        # Cricket profile fields
+        for field in ("bio", "city", "state_province", "country", "date_of_birth",
+                      "batting_style", "bowling_style", "player_role"):
+            if field in data:
+                update_data[field] = data[field] or None
 
         # Rebuild full_name if name changed
         if "first_name" in update_data or "last_name" in update_data:
@@ -140,23 +169,34 @@ class AuthService:
                 detail="User not found",
             )
 
-        # Invalidate Redis user cache so stale name/photo is not served
+        # Invalidate Redis user + profile caches so stale data is not served
         try:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()
             if r:
                 await r.delete(f"user:{user_id}")
+                if user.username:
+                    await r.delete(f"profile:{user.username.lower()}")
         except Exception:
             pass
 
         return {
             "id": user.id,
+            "username": getattr(user, 'username', None),
             "first_name": user.first_name,
             "last_name": user.last_name,
             "full_name": user.full_name,
             "mobile": user.mobile,
             "email": user.email,
             "profile": user.profile,
+            "bio": getattr(user, 'bio', None),
+            "city": getattr(user, 'city', None),
+            "state_province": getattr(user, 'state_province', None),
+            "country": getattr(user, 'country', None),
+            "date_of_birth": str(user.date_of_birth) if getattr(user, 'date_of_birth', None) else None,
+            "batting_style": getattr(user, 'batting_style', None),
+            "bowling_style": getattr(user, 'bowling_style', None),
+            "player_role": getattr(user, 'player_role', None),
         }
 
     @staticmethod

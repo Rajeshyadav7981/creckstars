@@ -13,7 +13,9 @@ from src.app.api.routers import main_router
 from src.app.api.config import CORS_ORIGINS, validate_config
 from src.app.api.rate_limiter import limiter, rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from src.utils.logger import request_id_var
+from src.utils.logger import request_id_var, get_logger
+
+_startup_logger = get_logger("startup")
 
 UPLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "uploads")
 
@@ -121,28 +123,28 @@ class CORSMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[STARTUP] Lifespan starting...")
+    _startup_logger.info("Lifespan starting...")
     # Schema managed via schema.sql — no migrations on startup
     try:
         validate_config()
-        print("[CONFIG] Validated")
+        _startup_logger.info("Config validated")
     except Exception as e:
-        print(f"[CONFIG] FATAL: {e}")
+        _startup_logger.error(f"Config FATAL: {e}")
         raise
     # Start Redis Pub/Sub subscriber for WebSocket multi-instance support
     try:
         from src.services.websocket_service import ws_manager
         await ws_manager.start_subscriber()
-        print("[WS] Subscriber started")
+        _startup_logger.info("WS subscriber started")
     except Exception as e:
-        print(f"[WS] Subscriber failed (non-fatal): {e}")
+        _startup_logger.warning(f"WS subscriber failed (non-fatal): {e}")
     # Start notification worker (Observer on same Redis event bus)
     try:
         from src.services.notification_service import notification_worker
         await notification_worker.start()
-        print("[Notifications] Worker started")
+        _startup_logger.info("Notifications worker started")
     except Exception as e:
-        print(f"[Notifications] Worker failed (non-fatal): {e}")
+        _startup_logger.warning(f"Notifications worker failed (non-fatal): {e}")
     yield
     try:
         await notification_worker.stop()
@@ -204,6 +206,26 @@ app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 # Serve APK releases
 from src.app.api.config import APK_DIR
 os.makedirs(APK_DIR, exist_ok=True)
+
+
+@app.get("/.well-known/assetlinks.json")
+async def asset_links():
+    """Android App Links verification — required for deep link autoVerify."""
+    return [
+        {
+            "relation": ["delegate_permission/common.handle_all_urls"],
+            "target": {
+                "namespace": "android_app",
+                "package_name": "com.creckstars.app",
+                "sha256_cert_fingerprints": [
+                    # Replace with your actual signing key fingerprint after first EAS build:
+                    # Run: eas credentials --platform android
+                    # Then copy the SHA-256 fingerprint here
+                    "FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C"
+                ],
+            },
+        }
+    ]
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import text, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -173,13 +173,28 @@ async def get_public_profile(
         target = result.scalar_one_or_none()
         if not target:
             raise HTTPException(status_code=404, detail="User not found")
+        # Find linked player_id so frontend can show cricket stats
+        from src.database.postgres.schemas.player_schema import PlayerSchema as _PS
+        pres = await session.execute(
+            select(_PS.id).where(_PS.user_id == target.id).order_by(_PS.id).limit(1)
+        )
+        linked_player_id = pres.scalar_one_or_none()
         profile_data = {
             "id": target.id,
+            "player_id": linked_player_id,
             "username": target.username,
             "full_name": target.full_name,
             "first_name": target.first_name,
             "last_name": target.last_name,
             "profile": target.profile,
+            "bio": getattr(target, 'bio', None),
+            "city": getattr(target, 'city', None),
+            "state_province": getattr(target, 'state_province', None),
+            "country": getattr(target, 'country', None),
+            "date_of_birth": str(target.date_of_birth) if getattr(target, 'date_of_birth', None) else None,
+            "batting_style": getattr(target, 'batting_style', None),
+            "bowling_style": getattr(target, 'bowling_style', None),
+            "player_role": getattr(target, 'player_role', None),
             "followers_count": getattr(target, 'followers_count', 0) or 0,
             "following_count": getattr(target, 'following_count', 0) or 0,
         }
@@ -265,120 +280,25 @@ async def check_username(
     return {"available": available, "username": username}
 
 
+# Re-export so existing callers can continue to `from src.app.api.routers.user_router import invalidate_user_stats`
+from src.services.user_stats_service import UserStatsService as _UserStatsSvc
+
+
+async def invalidate_user_stats(user_id: int):
+    """Public re-export → UserStatsService.invalidate. Kept for backward compat."""
+    await _UserStatsSvc.invalidate(user_id)
+
+
 @router.get("/me/stats")
 async def get_my_stats(
+    response: Response,
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ):
-    """Get profile + activity stats for the current user.
-
-    Differentiates between:
-      - "created" = things the user organized/created
-      - "played"  = matches/tournaments where the user was in a squad as a player
-    """
-    result = await session.execute(text("""
-        WITH
-        -- Player IDs linked to this user (typically 1, but could be multiple)
-        my_players AS (
-            SELECT id FROM players WHERE user_id = :uid
-        ),
-        -- Matches user played in (via squad)
-        played_matches AS (
-            SELECT DISTINCT ms.match_id
-            FROM match_squads ms
-            WHERE ms.player_id IN (SELECT id FROM my_players)
-        ),
-        -- Created counts (single scan of each table with conditional aggregation)
-        created AS (
-            SELECT
-                (SELECT COUNT(*) FROM teams WHERE created_by = :uid) AS teams,
-                COUNT(*) AS matches,
-                COUNT(*) FILTER (WHERE status = 'completed') AS matches_completed,
-                COUNT(*) FILTER (WHERE status IN ('live', 'in_progress')) AS matches_live,
-                COUNT(*) FILTER (WHERE status IN ('upcoming', 'scheduled', 'created', 'toss', 'squad_set')) AS matches_upcoming
-            FROM matches WHERE created_by = :uid
-        ),
-        created_tourn AS (
-            SELECT
-                COUNT(*) AS tournaments,
-                COUNT(*) FILTER (WHERE status = 'completed') AS tournaments_completed,
-                COUNT(*) FILTER (WHERE status = 'in_progress') AS tournaments_active
-            FROM tournaments WHERE created_by = :uid
-        ),
-        -- Played counts (single scan via played_matches CTE)
-        played AS (
-            SELECT
-                COUNT(*) AS matches,
-                COUNT(*) FILTER (WHERE m.status = 'completed') AS matches_completed,
-                COUNT(*) FILTER (WHERE m.status IN ('live', 'in_progress')) AS matches_live,
-                COUNT(DISTINCT m.tournament_id) FILTER (WHERE m.tournament_id IS NOT NULL) AS tournaments
-            FROM played_matches pm JOIN matches m ON m.id = pm.match_id
-        ),
-        played_teams AS (
-            SELECT COUNT(DISTINCT tp.team_id) AS teams
-            FROM team_players tp WHERE tp.player_id IN (SELECT id FROM my_players)
-        ),
-        -- Deduplicated totals (UNION removes duplicates)
-        totals AS (
-            SELECT
-                (SELECT COUNT(*) FROM (
-                    SELECT id FROM matches WHERE created_by = :uid
-                    UNION SELECT match_id FROM played_matches
-                ) x) AS matches,
-                (SELECT COUNT(*) FROM (
-                    SELECT id FROM matches WHERE created_by = :uid AND status = 'completed'
-                    UNION SELECT pm.match_id FROM played_matches pm JOIN matches m ON m.id = pm.match_id WHERE m.status = 'completed'
-                ) x) AS completed,
-                (SELECT COUNT(*) FROM (
-                    SELECT id FROM teams WHERE created_by = :uid
-                    UNION SELECT tp.team_id FROM team_players tp WHERE tp.player_id IN (SELECT id FROM my_players)
-                ) x) AS teams,
-                (SELECT COUNT(*) FROM (
-                    SELECT id FROM tournaments WHERE created_by = :uid
-                    UNION SELECT DISTINCT m.tournament_id FROM played_matches pm JOIN matches m ON m.id = pm.match_id WHERE m.tournament_id IS NOT NULL
-                ) x) AS tournaments
-        )
-        SELECT
-            c.teams AS teams_created, c.matches AS matches_created,
-            c.matches_completed AS matches_created_completed, c.matches_live AS matches_created_live,
-            c.matches_upcoming AS matches_created_upcoming,
-            ct.tournaments AS tournaments_created, ct.tournaments_completed AS tournaments_created_completed,
-            ct.tournaments_active AS tournaments_created_active,
-            (SELECT COUNT(*) FROM players WHERE created_by = :uid) AS players_created,
-            p.matches AS matches_played, p.matches_completed AS matches_played_completed,
-            p.matches_live AS matches_played_live, p.tournaments AS tournaments_played,
-            pt.teams AS teams_member,
-            t.matches AS total_matches, t.completed AS total_completed,
-            t.teams AS total_teams, t.tournaments AS total_tournaments
-        FROM created c, created_tourn ct, played p, played_teams pt, totals t
-    """), {"uid": user.id})
-    row = result.mappings().first()
-    return {
-        "created": {
-            "teams": row["teams_created"],
-            "matches": row["matches_created"],
-            "matches_completed": row["matches_created_completed"],
-            "matches_live": row["matches_created_live"],
-            "matches_upcoming": row["matches_created_upcoming"],
-            "tournaments": row["tournaments_created"],
-            "tournaments_completed": row["tournaments_created_completed"],
-            "tournaments_active": row["tournaments_created_active"],
-            "players": row["players_created"],
-        },
-        "played": {
-            "matches": row["matches_played"],
-            "matches_completed": row["matches_played_completed"],
-            "matches_live": row["matches_played_live"],
-            "tournaments": row["tournaments_played"],
-            "teams": row["teams_member"],
-        },
-        "total": {
-            "matches": row["total_matches"],
-            "completed": row["total_completed"],
-            "teams": row["total_teams"],
-            "tournaments": row["total_tournaments"],
-        },
-    }
+    """User activity stats. Redis-cached for 60s. Invalidated on writes."""
+    data, cached = await _UserStatsSvc.get(session, user.id)
+    response.headers["X-Cache"] = "HIT" if cached else "MISS"
+    return data
 
 
 # ═══════════════════════════════════════

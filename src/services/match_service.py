@@ -47,13 +47,13 @@ class MatchService:
     async def get_matches(
         session: AsyncSession, status_filter: str = None, tournament_id: int = None,
         search: str = None, created_by: int = None, stage_id: int = None,
-        for_user: int = None,
+        for_user: int = None, role: str = None,
         limit: int = 50, offset: int = 0,
     ):
         return await MatchRepository.get_all(
             session, status=status_filter, tournament_id=tournament_id,
             search=search, created_by=created_by, stage_id=stage_id,
-            for_user=for_user,
+            for_user=for_user, role=role,
             limit=limit, offset=offset,
         )
 
@@ -190,4 +190,3 @@ class MatchService:
                 "is_playing": sq.is_playing,
             })
         return result
-    

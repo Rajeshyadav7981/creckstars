@@ -37,7 +37,8 @@ REFRESH_TOKEN_EXPIRE_MINUTES = _env_int("REFRESH_TOKEN_EXPIRE_MINUTES", 10080)
 
 # ── OTP ──
 OTP_EXPIRE_MINUTES = _env_int("OTP_EXPIRE_MINUTES", 5)
-FAST2SMS_API_KEY = _env("FAST2SMS_MESSAGE_API_KEY")
+SMS_API_KEY = _env("SMS_API_KEY")
+SMS_TEMPLATE_ID = _env("SMS_TEMPLATE_ID")
 
 # ── CORS ──
 CORS_ORIGINS = _env("CORS_ORIGINS", "*")
@@ -137,4 +138,7 @@ def validate_config():
         warnings.warn("[CONFIG] CORS_ORIGINS is '*'. Fine for mobile APIs, restrict for web.", stacklevel=2)
 
     if SECRET_KEY == "creckstars-secret-change-in-production" or CORS_ORIGINS == "*":
-        print("[CONFIG] WARNING: Running with development-mode settings. Do not use in production.")
+        warnings.warn(
+            "[CONFIG] Running with development-mode settings. Do not use in production.",
+            stacklevel=2,
+        )

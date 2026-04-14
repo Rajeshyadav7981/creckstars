@@ -36,12 +36,13 @@ class TournamentService:
     @staticmethod
     async def get_tournaments(
         session: AsyncSession, status_filter: str = None, created_by: int = None,
-        search: str = None, for_user: int = None,
+        search: str = None, for_user: int = None, role: str = None,
         limit: int = 50, offset: int = 0,
     ):
         return await TournamentRepository.get_all(
             session, status=status_filter, created_by=created_by,
-            search=search, for_user=for_user, limit=limit, offset=offset,
+            search=search, for_user=for_user, role=role,
+            limit=limit, offset=offset,
         )
 
     @staticmethod

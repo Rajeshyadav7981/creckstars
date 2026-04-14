@@ -11,6 +11,7 @@ from src.database.postgres.repositories.match_repository import MatchRepository
 from src.database.postgres.repositories.match_event_repository import MatchEventRepository
 from src.services.websocket_service import ws_manager
 from src.services.cricket_rules import CricketRules
+from src.database.redis.match_cache import MatchCache
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -37,10 +38,16 @@ class ScoringService:
         if innings.status != "in_progress":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Innings not in progress")
 
-        # Fetch squad once — reused for max_wickets guard and new batsman validation
-        batting_squad = await MatchRepository.get_squad(session, match_id, innings.batting_team_id)
-        batting_squad_size = len(batting_squad) if batting_squad else (2 if innings.innings_number > 2 else 11)
-        batting_squad_ids = [player.id for player, sq in batting_squad] if batting_squad else []
+        # Fetch squad once — try Redis cache first, fall back to DB
+        cached_squad = await MatchCache.get_squad(match_id, innings.batting_team_id)
+        if cached_squad:
+            batting_squad_size = cached_squad["size"]
+            batting_squad_ids = cached_squad["ids"]
+        else:
+            batting_squad = await MatchRepository.get_squad(session, match_id, innings.batting_team_id)
+            batting_squad_size = len(batting_squad) if batting_squad else (2 if innings.innings_number > 2 else 11)
+            batting_squad_ids = [player.id for player, sq in batting_squad] if batting_squad else []
+            await MatchCache.set_squad(match_id, innings.batting_team_id, {"size": batting_squad_size, "ids": batting_squad_ids})
 
         # Guard: Block scoring if all wickets have fallen
         # Super over: if squad is 2 → 1 wicket ends it; if squad > 2 → 2 wickets max

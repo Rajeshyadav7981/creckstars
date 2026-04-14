@@ -24,23 +24,3 @@ class MatchStatusRequest(BaseModel):
 
 class BroadcastMessageRequest(BaseModel):
     message: str
-
-
-class LiveStateResponse(BaseModel):
-    match_id: int
-    innings_number: int
-    batting_team_id: int
-    bowling_team_id: int
-    total_runs: int
-    total_wickets: int
-    total_overs: float
-    current_over: int
-    current_ball: int
-    target: int | None = None
-    run_rate: float = 0.0
-    required_rate: float | None = None
-    striker: dict | None = None
-    non_striker: dict | None = None
-    bowler: dict | None = None
-    this_over: list = []
-    last_wicket: str | None = None

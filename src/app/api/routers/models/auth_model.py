@@ -1,3 +1,4 @@
+from datetime import date
 from pydantic import BaseModel
 
 
@@ -9,6 +10,15 @@ class RegisterRequest(BaseModel):
     password: str
     profile: str | None = None
     username: str | None = None  # Instagram-style @handle
+    # Cricket profile fields (optional at signup; fillable later in Edit Profile)
+    bio: str | None = None
+    city: str | None = None
+    state_province: str | None = None
+    country: str | None = None
+    date_of_birth: date | None = None
+    batting_style: str | None = None   # 'right_hand' | 'left_hand'
+    bowling_style: str | None = None   # 'right_arm_fast' | etc.
+    player_role: str | None = None     # 'batsman' | 'bowler' | 'all_rounder' | 'wicket_keeper'
 
 
 class LoginRequest(BaseModel):
@@ -25,6 +35,14 @@ class UserResponse(BaseModel):
     mobile: str
     email: str | None = None
     profile: str | None = None
+    bio: str | None = None
+    city: str | None = None
+    state_province: str | None = None
+    country: str | None = None
+    date_of_birth: date | None = None
+    batting_style: str | None = None
+    bowling_style: str | None = None
+    player_role: str | None = None
     followers_count: int = 0
     following_count: int = 0
 
@@ -36,9 +54,11 @@ class UpdateProfileRequest(BaseModel):
     last_name: str | None = None
     email: str | None = None
     profile: str | None = None
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: UserResponse
+    bio: str | None = None
+    city: str | None = None
+    state_province: str | None = None
+    country: str | None = None
+    date_of_birth: date | None = None
+    batting_style: str | None = None
+    bowling_style: str | None = None
+    player_role: str | None = None

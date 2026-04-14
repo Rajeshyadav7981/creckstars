@@ -14,6 +14,14 @@ CREATE TABLE IF NOT EXISTS users (
     password TEXT NOT NULL,
     username VARCHAR(30) UNIQUE,
     profile TEXT,
+    bio TEXT,
+    city VARCHAR(100),
+    state_province VARCHAR(100),
+    country VARCHAR(100),
+    date_of_birth DATE,
+    batting_style VARCHAR(20),
+    bowling_style VARCHAR(30),
+    player_role VARCHAR(20),
     followers_count INTEGER DEFAULT 0,
     following_count INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -226,6 +234,7 @@ CREATE TABLE IF NOT EXISTS match_squads (
 );
 CREATE INDEX IF NOT EXISTS ix_match_squads_match_team ON match_squads (match_id, team_id);
 CREATE INDEX IF NOT EXISTS ix_match_squads_player ON match_squads (player_id);
+CREATE INDEX IF NOT EXISTS ix_match_squads_player_match ON match_squads (player_id, match_id);
 
 -- ── Innings ──
 CREATE TABLE IF NOT EXISTS innings (
@@ -251,6 +260,7 @@ CREATE TABLE IF NOT EXISTS innings (
     UNIQUE(match_id, innings_number)
 );
 CREATE INDEX IF NOT EXISTS ix_innings_match_number ON innings (match_id, innings_number);
+CREATE INDEX IF NOT EXISTS ix_innings_match_status ON innings (match_id, status);
 
 -- ── Deliveries ──
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -279,6 +289,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings ON deliveries (innings_id);
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_over_ball ON deliveries (innings_id, over_number, ball_number);
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_seq ON deliveries (innings_id, actual_ball_seq DESC);
+CREATE INDEX IF NOT EXISTS ix_deliveries_innings_created ON deliveries (innings_id, created_at DESC);
 
 -- ── Overs ──
 CREATE TABLE IF NOT EXISTS overs (
@@ -313,6 +324,7 @@ CREATE TABLE IF NOT EXISTS batting_scorecards (
     UNIQUE(innings_id, player_id)
 );
 CREATE INDEX IF NOT EXISTS ix_batting_sc_innings_player ON batting_scorecards (innings_id, player_id);
+CREATE INDEX IF NOT EXISTS ix_batting_sc_innings_runs ON batting_scorecards (innings_id, runs DESC);
 
 -- ── Bowling Scorecards ──
 CREATE TABLE IF NOT EXISTS bowling_scorecards (
@@ -330,6 +342,7 @@ CREATE TABLE IF NOT EXISTS bowling_scorecards (
     UNIQUE(innings_id, player_id)
 );
 CREATE INDEX IF NOT EXISTS ix_bowling_sc_innings_player ON bowling_scorecards (innings_id, player_id);
+CREATE INDEX IF NOT EXISTS ix_bowling_sc_innings_wickets ON bowling_scorecards (innings_id, wickets DESC);
 
 -- ── Fall of Wickets ──
 CREATE TABLE IF NOT EXISTS fall_of_wickets (
@@ -476,6 +489,7 @@ CREATE TABLE IF NOT EXISTS mentions (
 );
 CREATE INDEX IF NOT EXISTS ix_mentions_mentioned ON mentions (mentioned_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_mentions_post ON mentions (post_id);
+CREATE INDEX IF NOT EXISTS ix_mentions_mentioner ON mentions (mentioner_user_id, created_at DESC);
 
 -- ── Polls ──
 CREATE TABLE IF NOT EXISTS polls (

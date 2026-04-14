@@ -58,6 +58,33 @@ async def _refresh_cache(session, match_id: int):
                     await MatchCache.set_generic(f"standings:{match.tournament_id}", None, ttl=1)
                 except Exception:
                     pass
+
+            # Invalidate stats cache for match creator + all squad members
+            # (played/created completed counts changed). Also invalidate per-player
+            # career stats cache so PlayerProfile reflects the new innings/spell.
+            try:
+                from src.app.api.routers.user_router import invalidate_user_stats
+                from src.database.postgres.schemas.match_squad_schema import MatchSquadSchema as _MSQ
+                from src.database.postgres.schemas.player_schema import PlayerSchema as _PS
+                from sqlalchemy import select as _sel
+                if match:
+                    await invalidate_user_stats(match.created_by)
+                    res = await session.execute(
+                        _sel(_MSQ.player_id, _PS.user_id)
+                        .join(_PS, _PS.id == _MSQ.player_id)
+                        .where(_MSQ.match_id == match_id)
+                    )
+                    seen_uids = set()
+                    seen_pids = set()
+                    for (pid, uid) in res.all():
+                        if uid and uid not in seen_uids:
+                            seen_uids.add(uid)
+                            await invalidate_user_stats(uid)
+                        if pid and pid not in seen_pids:
+                            seen_pids.add(pid)
+                            await MatchCache.set_generic(f"player_stats:{pid}", None, ttl=1)
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"Cache refresh failed for match {match_id}: {e}")
 

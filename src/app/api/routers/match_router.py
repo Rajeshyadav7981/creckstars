@@ -36,6 +36,9 @@ async def create_match(
         match_type=req.match_type, time_slot=req.time_slot,
         stage_id=req.stage_id, group_id=req.group_id,
     )
+    # Invalidate creator's stats cache
+    from src.app.api.routers.user_router import invalidate_user_stats
+    await invalidate_user_stats(user.id)
     return {"id": m.id, "match_code": m.match_code, "status": m.status, "team_a_id": m.team_a_id, "team_b_id": m.team_b_id, "overs": m.overs}
 
 
@@ -48,6 +51,7 @@ async def list_matches(
     stage_id: int = Query(None, description="Filter by tournament stage"),
     created_by: int = Query(None, description="Filter by creator user ID"),
     for_user: int = Query(None, description="Fetch matches created OR played by this user (returns role field)"),
+    role: str = Query(None, description="When for_user is set, filter to 'organized' or 'played' role only"),
     search: str = Query(None, description="Search matches by team name or code"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
@@ -55,13 +59,13 @@ async def list_matches(
     user=Depends(get_current_user_optional),
 ):
     uid = (user.id if user else 0)
-    cache_key = f"matches:u{for_user or created_by or uid}:s{status}:t{tournament_id}:st{stage_id}:l{limit}:o{offset}"
+    cache_key = f"matches:u{for_user or created_by or uid}:s{status}:t{tournament_id}:st{stage_id}:r{role}:l{limit}:o{offset}"
 
     async def _fetch():
         matches = await MatchService.get_matches(
             session, status_filter=status, tournament_id=tournament_id,
             search=search, created_by=created_by if not for_user else None,
-            stage_id=stage_id, for_user=for_user,
+            stage_id=stage_id, for_user=for_user, role=role,
             limit=limit, offset=offset,
         )
         team_ids = set()
@@ -278,6 +282,19 @@ async def set_squad(
     # Drop the cached squad row so the next GET reflects the new selection.
     from src.utils.cache import invalidate as _invalidate_cache
     await _invalidate_cache(f"squad:{match_id}:{req.team_id}")
+
+    # Invalidate stats cache for all users whose players were added to the squad
+    # (their played matches/tournaments count may have changed)
+    from src.app.api.routers.user_router import invalidate_user_stats
+    player_ids = [p.player_id for p in req.players]
+    if player_ids:
+        from src.database.postgres.schemas.player_schema import PlayerSchema as _PS
+        res = await session.execute(
+            select(_PS.user_id).where(_PS.id.in_(player_ids), _PS.user_id.isnot(None))
+        )
+        for (uid,) in res.all():
+            await invalidate_user_stats(uid)
+    await invalidate_user_stats(user.id)
 
     # Send push notification to squad players (fire-and-forget, own session)
     import asyncio

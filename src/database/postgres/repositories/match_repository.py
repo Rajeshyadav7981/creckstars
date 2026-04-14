@@ -55,7 +55,7 @@ class MatchRepository:
     async def get_all(
         session: AsyncSession, status: str = None, tournament_id: int = None,
         search: str = None, created_by: int = None, stage_id: int = None,
-        for_user: int = None,
+        for_user: int = None, role: str = None,
         limit: int = 50, offset: int = 0,
     ) -> list:
         """List matches with optional filters.
@@ -93,10 +93,20 @@ class MatchRepository:
                 else_=literal_column("'played'"),
             ).label('role')
 
+            # Apply role filter server-side (before LIMIT/OFFSET) for correct pagination
+            if role == 'played':
+                where_clause = played_exists
+            elif role == 'organized':
+                where_clause = is_organizer
+            elif role == 'both':
+                where_clause = and_(is_organizer, played_exists)
+            else:
+                where_clause = or_(is_organizer, played_exists)
+
             query = (
                 select(MatchSchema, role_expr)
                 .options(load_only(*MatchRepository._LIST_COLS))
-                .where(or_(is_organizer, played_exists))
+                .where(where_clause)
             )
             if status:
                 query = query.where(MatchSchema.status == status)

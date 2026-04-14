@@ -3,6 +3,9 @@ from slowapi.errors import RateLimitExceeded
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 from src.app.api.config import REDIS_URL, RATE_LIMIT_DEFAULT
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def _get_real_ip(request: Request) -> str:
@@ -47,7 +50,7 @@ if _storage_uri and _storage_uri.startswith("redis"):
         if _storage_uri.startswith("rediss://"):
             _storage_options = {"ssl_cert_reqs": "none"}
     except Exception:
-        print("[RATE LIMITER] Redis unavailable, using in-memory storage")
+        logger.warning("Redis unavailable, using in-memory storage")
         _storage_uri = "memory://"
         _storage_options = {}
 

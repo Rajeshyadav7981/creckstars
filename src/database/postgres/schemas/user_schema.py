@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, func
+from sqlalchemy import Column, Integer, String, DateTime, Date, Text, ForeignKey, func
 from src.database.postgres.db import Base
 
 
@@ -14,6 +14,15 @@ class UserSchema(Base):
     password = Column(Text, nullable=False)
     username = Column(String(30), unique=True, nullable=True, index=True)
     profile = Column(Text, nullable=True)
+    # Cricket profile fields (optional — user can fill during registration or later)
+    bio = Column(Text, nullable=True)
+    city = Column(String(100), nullable=True)
+    state_province = Column(String(100), nullable=True)
+    country = Column(String(100), nullable=True)
+    date_of_birth = Column(Date, nullable=True)
+    batting_style = Column(String(20), nullable=True)   # 'right_hand' | 'left_hand'
+    bowling_style = Column(String(30), nullable=True)   # 'right_arm_fast' | 'left_arm_spin' | ...
+    player_role = Column(String(20), nullable=True)     # 'batsman' | 'bowler' | 'all_rounder' | 'wicket_keeper'
     followers_count = Column(Integer, default=0)
     following_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
