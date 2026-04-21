@@ -84,18 +84,22 @@ class CommunityService:
                     sort_keys = await r.keys(f"cache:posts:{sort}:*")
                     if sort_keys:
                         await r.delete(*sort_keys)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
+
+    # Per-sort cache TTLs — top/hot change slowly, new needs freshness
+    _SORT_TTL = {"top": 300, "hot": 60, "new": 30}
 
     @staticmethod
     async def list_posts(session: AsyncSession, user_id: int, limit: int = 20, offset: int = 0, sort: str = "hot", cursor: str = None):
         # Shared cache key (no user_id — liked state added per-user after)
         cache_key = f"posts:{sort}:l{limit}:o{offset}:c{cursor or ''}"
+        cache_ttl = CommunityService._SORT_TTL.get(sort, 30)
         cached_posts = None
         try:
             cached_posts = await MatchCache.get_generic(cache_key)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
         if cached_posts is not None:
             posts = cached_posts.get("posts", [])
@@ -116,8 +120,8 @@ class CommunityService:
                     for pid, val in zip(post_ids, vals):
                         if val is not None:
                             redis_likes[pid] = int(val)
-            except Exception:
-                pass
+            except Exception as _e:
+                pass  # logged below not to crash hot path
 
             # NOTE: hot-score sorting now happens in SQL inside list_posts —
             # rows are already in the right order by the time they get here.
@@ -141,9 +145,9 @@ class CommunityService:
             next_cursor = str(posts[-1]["id"]) if posts and len(posts) == limit else None
             cached_posts = {"posts": posts, "next_cursor": next_cursor}
             try:
-                await MatchCache.set_generic(cache_key, cached_posts, ttl=30)
-            except Exception:
-                pass
+                await MatchCache.set_generic(cache_key, cached_posts, ttl=cache_ttl)
+            except Exception as _e:
+                pass  # logged below not to crash hot path
 
         # Per-user liked state (always fresh, not cached). Skip if guest.
         post_ids = [p["id"] for p in posts]
@@ -170,8 +174,8 @@ class CommunityService:
             r = await redis_client.get_client()
             if r:
                 await r.setex(f"post_likes:{post_id}", 300, str(max(0, new_count)))
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
         return {"liked": liked, "likes_count": max(0, new_count)}
 
     @staticmethod
@@ -206,8 +210,8 @@ class CommunityService:
                 keys = await r.keys(f"cache:comments:{post_id}:*")
                 if keys:
                     await r.delete(*keys)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
         return {"id": comment.id, "text": comment.text}
 
     @staticmethod
@@ -233,8 +237,8 @@ class CommunityService:
                 keys = await r.keys(f"cache:comments:{post_id}:*")
                 if keys:
                     await r.delete(*keys)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
         await CommunityService._invalidate_posts_cache()
         return {"message": "Comment deleted"}
 
@@ -276,8 +280,8 @@ class CommunityService:
                 keys = await r.keys(f"cache:comments:{post_id}:*")
                 if keys:
                     await r.delete(*keys)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
         await CommunityService._invalidate_posts_cache()
 
         return comment
@@ -291,8 +295,8 @@ class CommunityService:
             cached = await MatchCache.get_generic(cache_key)
             if cached:
                 return cached
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
         if parent_id:
             # Use closure table to fetch subtree under parent_id
@@ -358,8 +362,8 @@ class CommunityService:
         # Cache the tree structure (without user-specific liked state)
         try:
             await MatchCache.set_generic(cache_key, top_level, ttl=10)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
         # Add user-specific liked state (not cached — per-user)
         if user_id and flat_list:

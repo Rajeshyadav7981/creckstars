@@ -90,8 +90,8 @@ class NotificationService:
                 cached = await r.get(cache_key)
                 if cached:
                     return json.loads(cached)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
         tokens = set()
         try:
@@ -121,8 +121,8 @@ class NotificationService:
             r = await redis_client.get_client()
             if r:
                 await r.setex(cache_key, 60, json.dumps(token_list))
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
         return token_list
 

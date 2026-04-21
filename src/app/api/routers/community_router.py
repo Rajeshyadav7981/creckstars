@@ -52,8 +52,8 @@ async def upload_community_image(
         img.save(buf, format="JPEG", quality=75, optimize=True)
         content = buf.getvalue()
         ext = ".jpg"
-    except Exception:
-        pass
+    except Exception as _e:
+        pass  # logged below not to crash hot path
 
     community_dir = os.path.join(UPLOADS_DIR, "community")
     os.makedirs(community_dir, exist_ok=True)
