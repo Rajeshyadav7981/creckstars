@@ -1,9 +1,25 @@
--- ══════════════════════════════════════════════════════════
--- CrecKStars Database Schema
--- Run this once on a fresh PostgreSQL database
--- ══════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
+-- CrecKStars — Complete Database Schema
+-- Version: 2.0 (2026-04-17)
+--
+-- Usage:
+--   1. Create a fresh PostgreSQL database
+--   2. Run as superuser (for pg_trgm extension):
+--        psql -U postgres -d creckstars -f schema.sql
+--   3. All tables, indexes, constraints, and extensions in one file
+--   4. Safe to re-run (uses IF NOT EXISTS everywhere)
+--
+-- Tables: 27 | Indexes: 60+ | Extensions: pg_trgm
+-- ══════════════════════════════════════════════════════════════════════
 
--- ── Users ──
+-- ── Extensions (requires superuser) ──
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+
+-- ═══════════════════════════════════════
+-- CORE: Users & Authentication
+-- ═══════════════════════════════════════
+
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     first_name VARCHAR(100) NOT NULL,
@@ -13,27 +29,30 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255) UNIQUE,
     password TEXT NOT NULL,
     username VARCHAR(30) UNIQUE,
-    profile TEXT,
+    profile TEXT,                          -- photo URL or local path
+    -- Cricket profile (optional)
     bio TEXT,
     city VARCHAR(100),
     state_province VARCHAR(100),
     country VARCHAR(100),
     date_of_birth DATE,
-    batting_style VARCHAR(20),
-    bowling_style VARCHAR(30),
-    player_role VARCHAR(20),
+    batting_style VARCHAR(20),            -- right_hand | left_hand
+    bowling_style VARCHAR(30),            -- right_arm_fast | left_arm_spin | etc
+    player_role VARCHAR(20),              -- batsman | bowler | all_rounder | wicket_keeper
+    -- Social
     followers_count INTEGER DEFAULT 0,
     following_count INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
-
 CREATE INDEX IF NOT EXISTS ix_users_mobile ON users (mobile);
 CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username_lower ON users (LOWER(username));
 CREATE INDEX IF NOT EXISTS ix_users_username_prefix ON users (username varchar_pattern_ops) WHERE username IS NOT NULL;
-CREATE INDEX IF NOT EXISTS ix_users_full_name_lower ON users (lower(full_name) varchar_pattern_ops);
+CREATE INDEX IF NOT EXISTS ix_users_full_name_lower ON users (LOWER(full_name) varchar_pattern_ops);
+-- Trigram search (fast ILIKE '%query%')
+CREATE INDEX IF NOT EXISTS ix_users_username_trgm ON users USING gin (username gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS ix_users_full_name_trgm ON users USING gin (full_name gin_trgm_ops);
 
--- ── User Follows ──
 CREATE TABLE IF NOT EXISTS user_follows (
     follower_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     following_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -43,7 +62,22 @@ CREATE TABLE IF NOT EXISTS user_follows (
 CREATE INDEX IF NOT EXISTS ix_follows_following ON user_follows (following_id);
 CREATE INDEX IF NOT EXISTS ix_follows_follower ON user_follows (follower_id);
 
--- ── Venues ──
+CREATE TABLE IF NOT EXISTS otps (
+    id SERIAL PRIMARY KEY,
+    mobile VARCHAR(15) NOT NULL,
+    otp_code VARCHAR(6) NOT NULL,
+    is_verified BOOLEAN DEFAULT FALSE,
+    purpose VARCHAR(20) NOT NULL,         -- register | login | reset_password
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_otps_mobile ON otps (mobile);
+
+
+-- ═══════════════════════════════════════
+-- CRICKET: Players, Teams, Venues
+-- ═══════════════════════════════════════
+
 CREATE TABLE IF NOT EXISTS venues (
     id SERIAL PRIMARY KEY,
     name VARCHAR(200) NOT NULL,
@@ -58,7 +92,6 @@ CREATE TABLE IF NOT EXISTS venues (
 );
 CREATE INDEX IF NOT EXISTS ix_venues_geo ON venues (latitude, longitude) WHERE latitude IS NOT NULL;
 
--- ── Players ──
 CREATE TABLE IF NOT EXISTS players (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
@@ -82,7 +115,6 @@ CREATE TABLE IF NOT EXISTS players (
 CREATE INDEX IF NOT EXISTS ix_players_created_by ON players (created_by);
 CREATE INDEX IF NOT EXISTS ix_players_user_id ON players (user_id);
 
--- ── Teams ──
 CREATE TABLE IF NOT EXISTS teams (
     id SERIAL PRIMARY KEY,
     team_code VARCHAR(10) UNIQUE,
@@ -99,8 +131,8 @@ CREATE TABLE IF NOT EXISTS teams (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_teams_code ON teams (team_code) WHERE team_code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_teams_name_trgm ON teams USING gin (name gin_trgm_ops);
 
--- ── Team Players ──
 CREATE TABLE IF NOT EXISTS team_players (
     id SERIAL PRIMARY KEY,
     team_id INTEGER NOT NULL REFERENCES teams(id),
@@ -115,7 +147,11 @@ CREATE INDEX IF NOT EXISTS ix_team_players_team ON team_players (team_id);
 CREATE INDEX IF NOT EXISTS ix_team_players_player ON team_players (player_id);
 CREATE INDEX IF NOT EXISTS ix_team_players_composite ON team_players (team_id, player_id);
 
--- ── Tournaments ──
+
+-- ═══════════════════════════════════════
+-- TOURNAMENTS
+-- ═══════════════════════════════════════
+
 CREATE TABLE IF NOT EXISTS tournaments (
     id SERIAL PRIMARY KEY,
     tournament_code VARCHAR(10) UNIQUE,
@@ -142,8 +178,9 @@ CREATE TABLE IF NOT EXISTS tournaments (
 );
 CREATE INDEX IF NOT EXISTS ix_tournaments_tournament_code ON tournaments (tournament_code);
 CREATE INDEX IF NOT EXISTS ix_tournaments_created_by ON tournaments (created_by);
+CREATE INDEX IF NOT EXISTS ix_tournaments_name_trgm ON tournaments USING gin (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS ix_tournaments_code_trgm ON tournaments USING gin (tournament_code gin_trgm_ops);
 
--- ── Tournament Teams ──
 CREATE TABLE IF NOT EXISTS tournament_teams (
     id SERIAL PRIMARY KEY,
     tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
@@ -151,7 +188,6 @@ CREATE TABLE IF NOT EXISTS tournament_teams (
     UNIQUE(tournament_id, team_id)
 );
 
--- ── Tournament Stages ──
 CREATE TABLE IF NOT EXISTS tournament_stages (
     id SERIAL PRIMARY KEY,
     tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
@@ -164,7 +200,6 @@ CREATE TABLE IF NOT EXISTS tournament_stages (
     UNIQUE(tournament_id, stage_order)
 );
 
--- ── Tournament Groups ──
 CREATE TABLE IF NOT EXISTS tournament_groups (
     id SERIAL PRIMARY KEY,
     stage_id INTEGER NOT NULL REFERENCES tournament_stages(id) ON DELETE CASCADE,
@@ -175,7 +210,6 @@ CREATE TABLE IF NOT EXISTS tournament_groups (
 );
 CREATE INDEX IF NOT EXISTS ix_tournament_groups_stage ON tournament_groups (stage_id);
 
--- ── Tournament Group Teams ──
 CREATE TABLE IF NOT EXISTS tournament_group_teams (
     id SERIAL PRIMARY KEY,
     group_id INTEGER NOT NULL REFERENCES tournament_groups(id) ON DELETE CASCADE,
@@ -185,7 +219,11 @@ CREATE TABLE IF NOT EXISTS tournament_group_teams (
 );
 CREATE INDEX IF NOT EXISTS ix_tournament_group_teams_group ON tournament_group_teams (group_id);
 
--- ── Matches ──
+
+-- ═══════════════════════════════════════
+-- MATCHES & SCORING
+-- ═══════════════════════════════════════
+
 CREATE TABLE IF NOT EXISTS matches (
     id SERIAL PRIMARY KEY,
     match_code VARCHAR(10) UNIQUE,
@@ -221,8 +259,8 @@ CREATE INDEX IF NOT EXISTS ix_matches_status_created ON matches (status, created
 CREATE INDEX IF NOT EXISTS ix_matches_created_by_status ON matches (created_by, status);
 CREATE INDEX IF NOT EXISTS ix_matches_tournament_status ON matches (tournament_id, status);
 CREATE INDEX IF NOT EXISTS ix_matches_team_ids ON matches (team_a_id, team_b_id);
+CREATE INDEX IF NOT EXISTS ix_matches_code_trgm ON matches USING gin (match_code gin_trgm_ops);
 
--- ── Match Squads ──
 CREATE TABLE IF NOT EXISTS match_squads (
     id SERIAL PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id),
@@ -236,7 +274,6 @@ CREATE INDEX IF NOT EXISTS ix_match_squads_match_team ON match_squads (match_id,
 CREATE INDEX IF NOT EXISTS ix_match_squads_player ON match_squads (player_id);
 CREATE INDEX IF NOT EXISTS ix_match_squads_player_match ON match_squads (player_id, match_id);
 
--- ── Innings ──
 CREATE TABLE IF NOT EXISTS innings (
     id SERIAL PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id),
@@ -262,7 +299,6 @@ CREATE TABLE IF NOT EXISTS innings (
 CREATE INDEX IF NOT EXISTS ix_innings_match_number ON innings (match_id, innings_number);
 CREATE INDEX IF NOT EXISTS ix_innings_match_status ON innings (match_id, status);
 
--- ── Deliveries ──
 CREATE TABLE IF NOT EXISTS deliveries (
     id SERIAL PRIMARY KEY,
     innings_id INTEGER NOT NULL REFERENCES innings(id),
@@ -291,7 +327,6 @@ CREATE INDEX IF NOT EXISTS ix_deliveries_innings_over_ball ON deliveries (inning
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_seq ON deliveries (innings_id, actual_ball_seq DESC);
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_created ON deliveries (innings_id, created_at DESC);
 
--- ── Overs ──
 CREATE TABLE IF NOT EXISTS overs (
     id SERIAL PRIMARY KEY,
     innings_id INTEGER NOT NULL REFERENCES innings(id),
@@ -306,7 +341,6 @@ CREATE TABLE IF NOT EXISTS overs (
 );
 CREATE INDEX IF NOT EXISTS ix_overs_innings_number ON overs (innings_id, over_number);
 
--- ── Batting Scorecards ──
 CREATE TABLE IF NOT EXISTS batting_scorecards (
     id SERIAL PRIMARY KEY,
     innings_id INTEGER NOT NULL REFERENCES innings(id),
@@ -325,8 +359,10 @@ CREATE TABLE IF NOT EXISTS batting_scorecards (
 );
 CREATE INDEX IF NOT EXISTS ix_batting_sc_innings_player ON batting_scorecards (innings_id, player_id);
 CREATE INDEX IF NOT EXISTS ix_batting_sc_innings_runs ON batting_scorecards (innings_id, runs DESC);
+-- Covering index for player stats aggregation (index-only scan)
+CREATE INDEX IF NOT EXISTS ix_batting_sc_player_cover ON batting_scorecards (player_id) INCLUDE (runs, balls_faced, fours, sixes, is_out, innings_id);
+CREATE INDEX IF NOT EXISTS ix_batting_sc_player_id_desc ON batting_scorecards (player_id, id DESC);
 
--- ── Bowling Scorecards ──
 CREATE TABLE IF NOT EXISTS bowling_scorecards (
     id SERIAL PRIMARY KEY,
     innings_id INTEGER NOT NULL REFERENCES innings(id),
@@ -343,8 +379,10 @@ CREATE TABLE IF NOT EXISTS bowling_scorecards (
 );
 CREATE INDEX IF NOT EXISTS ix_bowling_sc_innings_player ON bowling_scorecards (innings_id, player_id);
 CREATE INDEX IF NOT EXISTS ix_bowling_sc_innings_wickets ON bowling_scorecards (innings_id, wickets DESC);
+-- Covering index for player stats aggregation (index-only scan)
+CREATE INDEX IF NOT EXISTS ix_bowling_sc_player_cover ON bowling_scorecards (player_id) INCLUDE (overs_bowled, runs_conceded, wickets, maidens, wides, no_balls, dot_balls, economy_rate, innings_id);
+CREATE INDEX IF NOT EXISTS ix_bowling_sc_player_id_desc ON bowling_scorecards (player_id, id DESC);
 
--- ── Fall of Wickets ──
 CREATE TABLE IF NOT EXISTS fall_of_wickets (
     id SERIAL PRIMARY KEY,
     innings_id INTEGER NOT NULL REFERENCES innings(id),
@@ -356,7 +394,6 @@ CREATE TABLE IF NOT EXISTS fall_of_wickets (
 );
 CREATE INDEX IF NOT EXISTS ix_fall_of_wickets_innings ON fall_of_wickets (innings_id);
 
--- ── Partnerships ──
 CREATE TABLE IF NOT EXISTS partnerships (
     id SERIAL PRIMARY KEY,
     innings_id INTEGER NOT NULL REFERENCES innings(id),
@@ -372,7 +409,6 @@ CREATE TABLE IF NOT EXISTS partnerships (
 );
 CREATE INDEX IF NOT EXISTS ix_partnerships_innings ON partnerships (innings_id);
 
--- ── Match Events (undo/redo log) ──
 CREATE TABLE IF NOT EXISTS match_events (
     id SERIAL PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id),
@@ -386,19 +422,11 @@ CREATE TABLE IF NOT EXISTS match_events (
 );
 CREATE INDEX IF NOT EXISTS ix_match_events_match_seq ON match_events (match_id, sequence_number);
 
--- ── OTPs ──
-CREATE TABLE IF NOT EXISTS otps (
-    id SERIAL PRIMARY KEY,
-    mobile VARCHAR(15) NOT NULL,
-    otp_code VARCHAR(6) NOT NULL,
-    is_verified BOOLEAN DEFAULT FALSE,
-    purpose VARCHAR(20) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    expires_at TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_otps_mobile ON otps (mobile);
 
--- ── Posts ──
+-- ═══════════════════════════════════════
+-- COMMUNITY: Posts, Comments, Polls
+-- ═══════════════════════════════════════
+
 CREATE TABLE IF NOT EXISTS posts (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -416,7 +444,6 @@ CREATE INDEX IF NOT EXISTS ix_posts_user_created ON posts (user_id, created_at D
 CREATE INDEX IF NOT EXISTS ix_posts_created_at ON posts (created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS ix_posts_likes_count ON posts (likes_count DESC, created_at DESC);
 
--- ── Post Likes ──
 CREATE TABLE IF NOT EXISTS post_likes (
     id SERIAL PRIMARY KEY,
     post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -426,7 +453,6 @@ CREATE TABLE IF NOT EXISTS post_likes (
 CREATE INDEX IF NOT EXISTS ix_post_likes_post_user ON post_likes (post_id, user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ix_post_likes_unique ON post_likes (post_id, user_id);
 
--- ── Post Comments ──
 CREATE TABLE IF NOT EXISTS post_comments (
     id SERIAL PRIMARY KEY,
     post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -440,7 +466,6 @@ CREATE INDEX IF NOT EXISTS ix_post_comments_post ON post_comments (post_id, crea
 CREATE INDEX IF NOT EXISTS ix_post_comments_parent ON post_comments (parent_id);
 CREATE INDEX IF NOT EXISTS ix_post_comments_post_created ON post_comments (post_id, created_at ASC);
 
--- ── Comment Closure Table ──
 CREATE TABLE IF NOT EXISTS comment_closure (
     ancestor_id INTEGER REFERENCES post_comments(id) ON DELETE CASCADE,
     descendant_id INTEGER REFERENCES post_comments(id) ON DELETE CASCADE,
@@ -451,7 +476,6 @@ CREATE INDEX IF NOT EXISTS ix_comment_closure_descendant ON comment_closure (des
 CREATE INDEX IF NOT EXISTS ix_comment_closure_ancestor_depth ON comment_closure (ancestor_id, depth);
 CREATE INDEX IF NOT EXISTS ix_comment_closure_covering ON comment_closure (ancestor_id, depth, descendant_id);
 
--- ── Comment Likes ──
 CREATE TABLE IF NOT EXISTS comment_likes (
     id SERIAL PRIMARY KEY,
     comment_id INTEGER NOT NULL REFERENCES post_comments(id) ON DELETE CASCADE,
@@ -461,7 +485,6 @@ CREATE TABLE IF NOT EXISTS comment_likes (
 CREATE INDEX IF NOT EXISTS ix_comment_likes_comment ON comment_likes (comment_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ix_comment_likes_unique ON comment_likes (comment_id, user_id);
 
--- ── Hashtags ──
 CREATE TABLE IF NOT EXISTS hashtags (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,
@@ -470,7 +493,6 @@ CREATE TABLE IF NOT EXISTS hashtags (
 );
 CREATE INDEX IF NOT EXISTS ix_hashtags_post_count ON hashtags (post_count DESC);
 
--- ── Post Hashtags (junction) ──
 CREATE TABLE IF NOT EXISTS post_hashtags (
     post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
     hashtag_id INTEGER NOT NULL REFERENCES hashtags(id) ON DELETE CASCADE,
@@ -478,7 +500,6 @@ CREATE TABLE IF NOT EXISTS post_hashtags (
 );
 CREATE INDEX IF NOT EXISTS ix_post_hashtags_hashtag ON post_hashtags (hashtag_id);
 
--- ── Mentions ──
 CREATE TABLE IF NOT EXISTS mentions (
     id SERIAL PRIMARY KEY,
     mentioned_user_id INTEGER NOT NULL REFERENCES users(id),
@@ -491,7 +512,6 @@ CREATE INDEX IF NOT EXISTS ix_mentions_mentioned ON mentions (mentioned_user_id,
 CREATE INDEX IF NOT EXISTS ix_mentions_post ON mentions (post_id);
 CREATE INDEX IF NOT EXISTS ix_mentions_mentioner ON mentions (mentioner_user_id, created_at DESC);
 
--- ── Polls ──
 CREATE TABLE IF NOT EXISTS polls (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -515,7 +535,11 @@ CREATE TABLE IF NOT EXISTS poll_votes (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ── Push Notifications ──
+
+-- ═══════════════════════════════════════
+-- NOTIFICATIONS & TELEMETRY
+-- ═══════════════════════════════════════
+
 CREATE TABLE IF NOT EXISTS push_tokens (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -540,7 +564,6 @@ CREATE TABLE IF NOT EXISTS match_subscriptions (
 CREATE INDEX IF NOT EXISTS ix_match_subs_user ON match_subscriptions (user_id);
 CREATE INDEX IF NOT EXISTS ix_match_subs_match ON match_subscriptions (match_id);
 
--- ── App Events / Telemetry ──
 CREATE TABLE IF NOT EXISTS app_events (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
@@ -553,8 +576,3 @@ CREATE TABLE IF NOT EXISTS app_events (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_app_events_type_date ON app_events (event_type, created_at DESC);
-
--- ── pg_trgm (optional — run as superuser if needed) ──
--- CREATE EXTENSION IF NOT EXISTS pg_trgm;
--- CREATE INDEX IF NOT EXISTS ix_users_username_trgm ON users USING gin (username gin_trgm_ops);
--- CREATE INDEX IF NOT EXISTS ix_users_full_name_trgm ON users USING gin (full_name gin_trgm_ops);
