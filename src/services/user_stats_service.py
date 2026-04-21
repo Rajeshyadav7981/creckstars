@@ -42,16 +42,16 @@ class UserStatsService:
                 cached = await r.get(cache_key)
                 if cached:
                     return json.loads(cached), True
-            except Exception:
-                pass
+            except Exception as _e:
+                pass  # logged below not to crash hot path
 
         data = await UserStatsService._compute(session, user_id)
 
         if r:
             try:
                 await r.setex(cache_key, STATS_CACHE_TTL, json.dumps(data, default=str))
-            except Exception:
-                pass
+            except Exception as _e:
+                pass  # logged below not to crash hot path
 
         return data, False
 

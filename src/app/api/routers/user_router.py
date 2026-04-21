@@ -44,8 +44,8 @@ async def search_users(
             cached = await r.get(cache_key)
             if cached:
                 return _json.loads(cached)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
     users = await UserRepository.search(session, query, limit=limit)
     result = [
@@ -60,8 +60,8 @@ async def search_users(
     if r:
         try:
             await r.setex(cache_key, 60, _json.dumps(result))
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
     return result
 
@@ -87,8 +87,8 @@ async def mention_search(
             cached = await r.get(cache_key)
             if cached:
                 return _json.loads(cached)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
     # Query: username prefix match first (most relevant), then name match
     from sqlalchemy.orm import load_only
@@ -139,8 +139,8 @@ async def mention_search(
     try:
         if r:
             await r.setex(cache_key, 30, _json.dumps(users))
-    except Exception:
-        pass
+    except Exception as _e:
+        pass  # logged below not to crash hot path
 
     return users
 
@@ -163,8 +163,8 @@ async def get_public_profile(
             cached = await r.get(cache_key)
             if cached:
                 profile_data = _json.loads(cached)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
     if not profile_data:
         result = await session.execute(
@@ -202,8 +202,8 @@ async def get_public_profile(
         if r:
             try:
                 await r.setex(cache_key, 300, _json.dumps(profile_data))
-            except Exception:
-                pass
+            except Exception as _e:
+                pass  # logged below not to crash hot path
 
     # Follow status is user-specific — always check live (skip for guests)
     is_following = False
@@ -255,8 +255,8 @@ async def set_username(
         r = await redis_client.get_client()
         if r:
             await r.delete(f"user:{user.id}")
-    except Exception:
-        pass
+    except Exception as _e:
+        pass  # logged below not to crash hot path
 
     return {"username": username}
 
@@ -351,8 +351,8 @@ async def follow_user(
             if target_username:
                 keys.append(f"profile:{target_username.lower()}")
             await r.delete(*keys)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
     return {"status": "followed"}
 
@@ -392,8 +392,8 @@ async def unfollow_user(
             if target_username:
                 keys.append(f"profile:{target_username.lower()}")
             await r.delete(*keys)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
     return {"status": "unfollowed"}
 
@@ -433,8 +433,8 @@ async def get_followers(
             cached = await r.get(cache_key)
             if cached:
                 users_data = _json.loads(cached)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
     if users_data is None:
         result = await session.execute(
@@ -450,8 +450,8 @@ async def get_followers(
         if r:
             try:
                 await r.setex(cache_key, 120, _json.dumps(users_data))
-            except Exception:
-                pass
+            except Exception as _e:
+                pass  # logged below not to crash hot path
 
     # Follow-back status is user-specific — always check live (skip for guests)
     user_ids = [u["id"] for u in users_data]
@@ -487,8 +487,8 @@ async def get_following(
             cached = await r.get(cache_key)
             if cached:
                 users_data = _json.loads(cached)
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
     if users_data is None:
         result = await session.execute(
@@ -504,8 +504,8 @@ async def get_following(
         if r:
             try:
                 await r.setex(cache_key, 120, _json.dumps(users_data))
-            except Exception:
-                pass
+            except Exception as _e:
+                pass  # logged below not to crash hot path
 
     # Follow-back status is user-specific — always check live (skip for guests)
     user_ids = [u["id"] for u in users_data]

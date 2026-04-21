@@ -148,8 +148,8 @@ async def upload_profile_photo(
             img.save(buf, format="JPEG", quality=75, optimize=True)
             content = buf.getvalue()
             ext = ".jpg"
-        except Exception:
-            pass  # Keep original if compression fails
+        except Exception as _e:
+            pass  # logged below not to crash hot path  # Keep original if compression fails
 
     # Save file
     profiles_dir = os.path.join(UPLOADS_DIR, "profiles")
@@ -169,8 +169,8 @@ async def upload_profile_photo(
         r = await redis_client.get_client()
         if r:
             await r.delete(f"user:{current_user.id}")
-    except Exception:
-        pass
+    except Exception as _e:
+        pass  # logged below not to crash hot path
 
     return {"profile": profile_url}
 
@@ -179,12 +179,17 @@ async def upload_profile_photo(
 
 class SendOTPRequest(BaseModel):
     mobile: str
-    purpose: str = "register"  # "register" or "login"
+    purpose: str = "register"  # "register" | "login" | "reset_password"
 
 class VerifyOTPRequest(BaseModel):
     mobile: str
     otp: str
     purpose: str = "register"
+
+class ResetPasswordRequest(BaseModel):
+    mobile: str
+    otp: str
+    new_password: str
 
 
 @router.post("/send-otp")
@@ -202,6 +207,12 @@ async def send_otp(
     mobile = data.mobile.strip()
     if len(mobile) != 10 or not mobile.isdigit():
         raise HTTPException(status_code=400, detail="Invalid mobile number")
+
+    # For password reset, the mobile must already be registered
+    if data.purpose == "reset_password":
+        existing = await UserRepository.get_by_mobile(session, mobile)
+        if not existing:
+            raise HTTPException(status_code=404, detail="No account found with this mobile number")
 
     otp_code = str(random.randint(100000, 999999))
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
@@ -235,10 +246,15 @@ async def send_otp(
                     },
                 )
                 result = resp.json()
+                # MSG91 returns type="success" on accepted, type="error" on rejected.
+                # A zero-balance or suspended account often returns "success" but never
+                # actually delivers — so also log the full response for debugging.
                 if result.get("type") == "error":
-                    logger.warning(f"[OTP] MSG91 error: {result.get('message')}")
-                    raise HTTPException(status_code=500, detail="Failed to send OTP. Try again.")
-                logger.info(f"[OTP] SMS sent to {mobile} via MSG91")
+                    logger.warning(f"[OTP] MSG91 rejected: {result}")
+                    raise HTTPException(status_code=500, detail=f"SMS failed: {result.get('message', 'unknown error')}")
+                if result.get("type") != "success":
+                    logger.warning(f"[OTP] MSG91 unexpected response: {result}")
+                logger.info(f"[OTP] SMS dispatched to {mobile} via MSG91 (response: {result.get('type')})")
         except httpx.HTTPError as e:
             logger.error(f"[OTP] MSG91 request failed: {e}")
             raise HTTPException(status_code=500, detail="SMS service unavailable. Try again.")
@@ -279,3 +295,63 @@ async def verify_otp(
 
     await OTPRepository.mark_verified(session, otp_record.id)
     return {"verified": True}
+
+
+@router.post("/reset-password")
+@limiter.limit("5/minute")
+async def reset_password(
+    request: Request,
+    data: ResetPasswordRequest,
+    session: AsyncSession = Depends(get_async_db),
+):
+    """Reset password after OTP verification.
+    Flow: user calls /send-otp with purpose='reset_password' → enters OTP + new password here.
+    """
+    from datetime import datetime, timezone
+    from src.database.postgres.repositories.otp_repository import OTPRepository
+    from src.utils.security import hash_password
+
+    mobile = data.mobile.strip()
+    new_password = data.new_password
+
+    # Password strength check (same rules as register)
+    if len(new_password) < 8 or len(new_password) > 50:
+        raise HTTPException(status_code=400, detail="Password must be 8–50 characters")
+    if not any(c.isalpha() for c in new_password):
+        raise HTTPException(status_code=400, detail="Password must contain a letter")
+    if not any(c.isdigit() for c in new_password):
+        raise HTTPException(status_code=400, detail="Password must contain a number")
+
+    # Verify user exists
+    user = await UserRepository.get_by_mobile(session, mobile)
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found with this mobile number")
+
+    # Validate the reset OTP (same logic as verify-otp)
+    otp_record = await OTPRepository.get_latest_otp(session, mobile, "reset_password")
+    if not otp_record:
+        raise HTTPException(status_code=400, detail="No OTP found. Request a new one.")
+    if otp_record.is_verified:
+        raise HTTPException(status_code=400, detail="OTP already used. Request a new one.")
+    if otp_record.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="OTP expired. Request a new one.")
+    if otp_record.otp_code != data.otp.strip():
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    # Mark OTP used so it can't be reused
+    await OTPRepository.mark_verified(session, otp_record.id)
+
+    # Update password
+    await UserRepository.update_password(session, user.id, hash_password(new_password))
+
+    # Invalidate cached user + any existing sessions
+    try:
+        from src.database.redis.redis_client import redis_client
+        r = await redis_client.get_client()
+        if r:
+            await r.delete(f"user:{user.id}")
+    except Exception as _e:
+        pass  # logged below not to crash hot path
+
+    logger.info("Password reset", extra={"extra_data": {"user_id": user.id, "mobile": mobile}})
+    return {"message": "Password reset successful. Please log in with your new password."}

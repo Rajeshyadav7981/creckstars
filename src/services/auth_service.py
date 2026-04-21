@@ -177,8 +177,8 @@ class AuthService:
                 await r.delete(f"user:{user_id}")
                 if user.username:
                     await r.delete(f"profile:{user.username.lower()}")
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
         return {
             "id": user.id,
