@@ -315,8 +315,8 @@ async def set_squad(
                     f"You've been selected in {team_name}'s playing XI!",
                     {"match_id": match_id, "type": "squad_set"},
                 )
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
     asyncio.create_task(_notify_squad())
 
     return {"message": "Squad set successfully"}

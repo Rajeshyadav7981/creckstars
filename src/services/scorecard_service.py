@@ -46,6 +46,15 @@ class ScorecardService:
         all_bowling = await ScorecardRepository.get_bowling_for_innings_ids(session, innings_ids)
         all_fow = await ScorecardRepository.get_fall_of_wickets_for_innings_ids(session, innings_ids)
         all_partnerships = await ScorecardRepository.get_partnerships_for_innings_ids(session, innings_ids)
+        # Per-over roll-up for chart series ({over, runs, wickets}). Single GROUP BY query.
+        all_over_aggs = await DeliveryRepository.get_over_aggregates_for_innings_ids(session, innings_ids)
+        over_series_by_inn = defaultdict(list)
+        for row in all_over_aggs:
+            over_series_by_inn[row.innings_id].append({
+                "over": (row.over_number or 0) + 1,  # 1-indexed for display
+                "runs": int(row.runs or 0),
+                "wickets": int(row.wickets or 0),
+            })
 
         batting_by_inn = defaultdict(list)
         for b in all_batting:
@@ -159,6 +168,7 @@ class ScorecardService:
                 "bowling": bowling_cards,
                 "fall_of_wickets": fow_list,
                 "partnerships": partnership_list,
+                "over_series": over_series_by_inn.get(inn.id, []),
             })
 
         # Compute top performers for completed matches

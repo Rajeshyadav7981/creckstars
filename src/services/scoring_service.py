@@ -113,7 +113,8 @@ class ScoringService:
         next_seq = await DeliveryRepository.get_next_ball_seq(session, innings.id)
 
         # Insert delivery
-        delivery = await DeliveryRepository.create(session, {
+        # Client-authored commentary (from ShotZonePicker) is persisted if provided.
+        delivery_payload = {
             "innings_id": innings.id,
             "over_number": current_over,
             "ball_number": current_ball if is_legal else innings.current_ball,
@@ -132,7 +133,11 @@ class ScoringService:
             "dismissed_player_id": data.get("dismissed_player_id"),
             "fielder_id": data.get("fielder_id"),
             "is_legal": is_legal,
-        })
+        }
+        client_commentary = data.get("commentary")
+        if client_commentary:
+            delivery_payload["commentary"] = client_commentary
+        delivery = await DeliveryRepository.create(session, delivery_payload)
 
         # Update batting scorecard (runs scored by batsman, not extras like wides/byes)
         runs_to_batsman = batsman_runs
@@ -409,6 +414,16 @@ class ScoringService:
             "over_complete": over_complete,
             "innings_complete": innings_complete,
             "is_legal": is_legal,
+            # Event flags — viewers use these to trigger celebration overlays
+            "batsman_runs": batsman_runs,
+            "is_wicket": is_wicket,
+            "is_six": is_six,
+            "is_boundary": is_boundary,
+            "wicket_type": data.get("wicket_type") if is_wicket else None,
+            # Client-authored enrichments (optional) — pass through for live commentary / wagon wheel
+            "commentary": data.get("commentary"),
+            "field_zone": data.get("field_zone"),
+            "batting_hand": data.get("batting_hand"),
         }
         await ws_manager.broadcast(match_id, {"type": "delivery", "data": result})
 

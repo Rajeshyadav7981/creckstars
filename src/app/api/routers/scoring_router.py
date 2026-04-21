@@ -56,8 +56,8 @@ async def _refresh_cache(session, match_id: int):
                     from src.utils.cache import invalidate
                     await invalidate(f"tournament:{match.tournament_id}")
                     await MatchCache.set_generic(f"standings:{match.tournament_id}", None, ttl=1)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    pass  # logged below not to crash hot path
 
             # Invalidate stats cache for match creator + all squad members
             # (played/created completed counts changed). Also invalidate per-player
@@ -83,8 +83,8 @@ async def _refresh_cache(session, match_id: int):
                         if pid and pid not in seen_pids:
                             seen_pids.add(pid)
                             await MatchCache.set_generic(f"player_stats:{pid}", None, ttl=1)
-            except Exception:
-                pass
+            except Exception as _e:
+                pass  # logged below not to crash hot path
     except Exception as e:
         logger.warning(f"Cache refresh failed for match {match_id}: {e}")
 
