@@ -86,8 +86,8 @@ class TournamentService:
                 )
                 for g in groups_result.scalars().all():
                     group_map[g.id] = g.group_name
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # logged below not to crash hot path
 
         return {
             "tournament": tournament,

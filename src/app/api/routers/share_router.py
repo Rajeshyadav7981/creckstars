@@ -354,8 +354,8 @@ async def share_match(request: Request, match_id: int):
                     description = "LIVE now! Tap to watch ball-by-ball"
                 else:
                     description = f"{match.overs}-over match on CrecKStars"
-    except Exception:
-        pass
+    except Exception as _e:
+        pass  # logged below not to crash hot path
 
     return _build_redirect_html(
         title=title,
@@ -384,8 +384,8 @@ async def share_scorecard(request: Request, match_id: int):
                 ta_name = ta.name if ta else "Team A"
                 tb_name = tb.name if tb else "Team B"
                 title = f"{ta_name} vs {tb_name} - Scorecard"
-    except Exception:
-        pass
+    except Exception as _e:
+        pass  # logged below not to crash hot path
 
     return _build_redirect_html(
         title=title,
@@ -407,8 +407,8 @@ async def share_tournament(request: Request, tournament_id: int):
             if t:
                 title = t.name or title
                 description = f"{t.name} - View standings, fixtures & results"
-    except Exception:
-        pass
+    except Exception as _e:
+        pass  # logged below not to crash hot path
 
     return _build_redirect_html(
         title=title,

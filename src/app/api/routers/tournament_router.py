@@ -276,15 +276,15 @@ async def get_tournament_standings(
         cached = await MatchCache.get_generic(cache_key)
         if cached:
             return cached
-    except Exception:
-        pass
+    except Exception as _e:
+        pass  # logged below not to crash hot path
     standings = await TournamentService.get_standings(session, tournament_id)
     result = {"tournament_id": tournament_id, "standings": standings}
     try:
         # Standings are expensive to compute — cache for 60s
         await MatchCache.set_generic(cache_key, result, ttl=60)
-    except Exception:
-        pass
+    except Exception as _e:
+        pass  # logged below not to crash hot path
     return result
 
 
