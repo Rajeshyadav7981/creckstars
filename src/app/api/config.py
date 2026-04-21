@@ -142,3 +142,31 @@ def validate_config():
             "[CONFIG] Running with development-mode settings. Do not use in production.",
             stacklevel=2,
         )
+
+
+# ── Cache TTLs (seconds) — centralized so tuning is easy ──
+CACHE_TTL_USER_PROFILE = 300     # /users/@username
+CACHE_TTL_USER_SEARCH = 60      # /users/search
+CACHE_TTL_MENTION_SEARCH = 30   # /users/mention-search
+CACHE_TTL_FOLLOWERS = 120       # followers/following lists
+CACHE_TTL_STANDINGS = 60        # tournament standings
+CACHE_TTL_PLAYER_STATS = 30     # player career stats
+CACHE_TTL_USER_STATS = 60       # /me/stats
+CACHE_TTL_LIVE_STATE = 5        # live match state (hot path)
+CACHE_TTL_LIVE_STATE_DONE = 300  # completed match state
+CACHE_TTL_SCORECARD = 60        # live match scorecard
+CACHE_TTL_SCORECARD_DONE = 600  # completed match scorecard
+CACHE_TTL_COMMENTARY = 30       # commentary
+
+# ── Upload Limits ──
+MAX_PROFILE_PHOTO_SIZE = 5 * 1024 * 1024    # 5 MB
+MAX_POST_IMAGE_SIZE = 10 * 1024 * 1024      # 10 MB
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+PROFILE_PHOTO_MAX_WIDTH = 512
+POST_IMAGE_MAX_WIDTH = 1024
+
+# ── Pagination Defaults ──
+DEFAULT_PAGE_LIMIT = 50
+MAX_PAGE_LIMIT = 100
+MAX_COMMENT_DEPTH = 20
+MAX_COMMENTS_PER_PAGE = 500
