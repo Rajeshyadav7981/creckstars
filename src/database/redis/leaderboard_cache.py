@@ -1,5 +1,4 @@
 """Redis Sorted Sets for instant leaderboard rankings."""
-import json
 from src.database.redis.redis_client import redis_client
 from src.utils.logger import get_logger
 

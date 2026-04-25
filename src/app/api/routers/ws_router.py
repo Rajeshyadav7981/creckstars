@@ -1,5 +1,4 @@
 import json
-import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from src.services.websocket_service import ws_manager
 
@@ -13,9 +12,7 @@ async def match_websocket(websocket: WebSocket, match_id: int):
         return
     try:
         while True:
-            # Keep connection alive, receive pings
             data = await websocket.receive_text()
-            # Client can send ping messages
             if data == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
     except WebSocketDisconnect:

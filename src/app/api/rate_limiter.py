@@ -1,5 +1,4 @@
 from slowapi import Limiter
-from slowapi.errors import RateLimitExceeded
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 from src.app.api.config import REDIS_URL, RATE_LIMIT_DEFAULT
@@ -37,10 +36,8 @@ def _get_user_or_ip(request: Request) -> str:
     return _get_real_ip(request)
 
 
-# Use Redis for rate limiting if available, fallback to in-memory
 _storage_uri = REDIS_URL if REDIS_URL else "memory://"
 _storage_options = {}
-# Test Redis connectivity for rate limiter (sync client)
 if _storage_uri and _storage_uri.startswith("redis"):
     try:
         import redis as _sync_redis

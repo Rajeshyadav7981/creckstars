@@ -43,10 +43,7 @@ class TournamentRepository:
         search: str = None, for_user: int = None, role: str = None,
         limit: int = 50, offset: int = 0,
     ) -> list:
-        """List tournaments. When `for_user` is set, returns tournaments the
-        user created OR where user's player is on a participating team.
-        Each returned tournament gets a `._role` attribute: organized|played|both.
-        """
+        """List tournaments; when `for_user` is set, returns tournaments the user created OR where user's player is on a participating team (each row gets a `._role` attribute: organized|played|both)."""
         from sqlalchemy import or_, case, and_, literal_column
 
         if for_user:
@@ -104,7 +101,6 @@ class TournamentRepository:
                 tournaments.append(t)
             return tournaments
 
-        # Standard path
         query = select(TournamentSchema).options(load_only(*TournamentRepository._LIST_COLS))
         if status:
             query = query.where(TournamentSchema.status == status)

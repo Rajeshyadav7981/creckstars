@@ -13,6 +13,9 @@ from src.app.api.routers.models.community_model import (
 )
 from src.app.api.rate_limiter import limiter
 from src.app.api.config import RATE_LIMITS
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 UPLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))), "uploads")
 ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
@@ -39,21 +42,18 @@ async def upload_community_image(
     if len(content) > MAX_IMAGE_SIZE:
         raise HTTPException(status_code=400, detail="File too large. Max 10 MB.")
 
-    # Compress if needed
+    # Re-encode to ≤ 2 MB. If Pillow can't parse the bytes we fall back to the
+    # raw content (same behaviour as before — community posts historically
+    # tolerated non-image payloads), but log it.
     try:
         from PIL import Image as PILImage
         import io
+        from src.utils.image_compress import compress_to_target_size
         img = PILImage.open(io.BytesIO(content))
-        img = img.convert("RGB")
-        if img.width > 1024:
-            ratio = 1024 / img.width
-            img = img.resize((1024, int(img.height * ratio)), PILImage.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=75, optimize=True)
-        content = buf.getvalue()
+        content = compress_to_target_size(img, target_bytes=2 * 1024 * 1024, max_width=1024)
         ext = ".jpg"
     except Exception as _e:
-        pass  # logged below not to crash hot path
+        logger.warning('Image compression skipped', extra={'extra_data': {'error': str(_e)}})
 
     community_dir = os.path.join(UPLOADS_DIR, "community")
     os.makedirs(community_dir, exist_ok=True)

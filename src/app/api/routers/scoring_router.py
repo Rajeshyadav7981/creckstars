@@ -11,6 +11,7 @@ from src.database.redis.match_cache import MatchCache
 from src.services.scorecard_service import ScorecardService
 from src.app.api.rate_limiter import limiter
 from src.app.api.config import RATE_LIMITS
+from src.utils.idempotency import idempotent
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,10 +46,8 @@ async def _refresh_cache(session, match_id: int):
 
         # Invalidate the heavy caches — first read after mutation repopulates them
         await MatchCache.set_scorecard(match_id, None, ttl=1)
-        # Match detail cache also needs to reflect new status / score
         await MatchCache.set_generic(f"match_detail:{match_id}", None, ttl=1)
 
-        # Invalidate tournament standings cache when match completes
         if is_completed:
             match = await MatchRepository.get_by_id(session, match_id)
             if match and match.tournament_id:
@@ -57,7 +56,7 @@ async def _refresh_cache(session, match_id: int):
                     await invalidate(f"tournament:{match.tournament_id}")
                     await MatchCache.set_generic(f"standings:{match.tournament_id}", None, ttl=1)
                 except Exception as _e:
-                    pass  # logged below not to crash hot path
+                    logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
 
             # Invalidate stats cache for match creator + all squad members
             # (played/created completed counts changed). Also invalidate per-player
@@ -84,7 +83,7 @@ async def _refresh_cache(session, match_id: int):
                             seen_pids.add(pid)
                             await MatchCache.set_generic(f"player_stats:{pid}", None, ttl=1)
             except Exception as _e:
-                pass  # logged below not to crash hot path
+                logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
     except Exception as e:
         logger.warning(f"Cache refresh failed for match {match_id}: {e}")
 
@@ -104,6 +103,7 @@ async def _refresh_cache_background(match_id: int):
 
 @router.post("/{match_id}/score")
 @limiter.limit(RATE_LIMITS["score_delivery"])
+@idempotent(ttl_seconds=600)
 async def score_delivery(
     request: Request,
     match_id: int,
@@ -113,7 +113,6 @@ async def score_delivery(
 ):
     await _check_match_owner(session, match_id, user.id)
     result = await ScoringService.record_delivery(session, match_id, user.id, req.model_dump())
-    # Move cache refresh to background so the response returns immediately.
     # Fire-and-forget: refresh cache in the background without blocking
     # the worker (FastAPI BackgroundTasks would serialize on a single worker).
     _asyncio.create_task(_refresh_cache_background(match_id))
@@ -122,6 +121,7 @@ async def score_delivery(
 
 @router.post("/{match_id}/undo")
 @limiter.limit(RATE_LIMITS["undo"])
+@idempotent(ttl_seconds=600)
 async def undo_last_ball(
     request: Request,
     match_id: int,
@@ -135,7 +135,10 @@ async def undo_last_ball(
 
 
 @router.post("/{match_id}/end-over")
+@limiter.limit(RATE_LIMITS["end_over"])
+@idempotent(ttl_seconds=600)
 async def end_over(
+    request: Request,
     match_id: int,
     req: EndOverRequest,
     session: AsyncSession = Depends(get_async_db),
@@ -143,28 +146,28 @@ async def end_over(
 ):
     await _check_match_owner(session, match_id, user.id)
     result = await ScoringService.end_over(session, match_id, req.next_bowler_id)
-    # Fire-and-forget: refresh cache in the background without blocking
-    # the worker (FastAPI BackgroundTasks would serialize on a single worker).
     _asyncio.create_task(_refresh_cache_background(match_id))
     return result
 
 
 @router.post("/{match_id}/end-innings")
+@limiter.limit(RATE_LIMITS["end_innings"])
 async def end_innings(
+    request: Request,
     match_id: int,
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ):
     await _check_match_owner(session, match_id, user.id)
     result = await ScoringService.end_innings(session, match_id)
-    # Fire-and-forget: refresh cache in the background without blocking
-    # the worker (FastAPI BackgroundTasks would serialize on a single worker).
     _asyncio.create_task(_refresh_cache_background(match_id))
     return result
 
 
 @router.post("/{match_id}/end-match")
+@limiter.limit(RATE_LIMITS["end_match"])
 async def end_match(
+    request: Request,
     match_id: int,
     force_tie: bool = False,
     session: AsyncSession = Depends(get_async_db),
@@ -195,7 +198,9 @@ async def swap_batters(
 
 
 @router.post("/{match_id}/revert")
+@limiter.limit(RATE_LIMITS["revert"])
 async def revert_match(
+    request: Request,
     match_id: int,
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
@@ -230,7 +235,6 @@ async def broadcast_message(
         raise HTTPException(status_code=400, detail="Message too long (max 200 chars)")
     # Store in Redis (auto-expires in 10 min)
     await MatchCache.set_broadcast_message(match_id, message)
-    # Broadcast via WebSocket to all viewers
     await MatchCache.publish_update(match_id, "broadcast", {"message": message})
     return {"status": "ok", "message": message}
 

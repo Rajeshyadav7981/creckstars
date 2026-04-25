@@ -9,8 +9,10 @@ class DeliveryRepository:
     async def create(session: AsyncSession, data: dict) -> DeliverySchema:
         delivery = DeliverySchema(**data)
         session.add(delivery)
+        # flush() alone populates the PK — refresh is only needed for server-side
+        # defaults we never read here (created_at). Skipping it saves one round-trip
+        # on every ball recorded.
         await session.flush()
-        await session.refresh(delivery)
         return delivery
 
     @staticmethod
@@ -68,8 +70,7 @@ class DeliveryRepository:
 
     @staticmethod
     async def get_over_aggregates_for_innings_ids(session: AsyncSession, innings_ids: list) -> list:
-        """Bulk per-over roll-up: (innings_id, over_number) -> runs, wickets.
-        Drives the Runs per Over + Run Rate charts without shipping every ball to the client."""
+        """Bulk per-over roll-up — drives Runs per Over + Run Rate charts without shipping every ball to the client."""
         if not innings_ids:
             return []
         q = (

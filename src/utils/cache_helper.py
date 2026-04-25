@@ -1,19 +1,4 @@
-"""
-Reusable Redis cache helper — eliminates duplicate boilerplate across routers/services.
-
-Usage:
-    from src.utils.cache_helper import cache_get, cache_set, cache_delete, cached_async
-
-    # Manual:
-    data = await cache_get("profile:john")
-    await cache_set("profile:john", data, ttl=300)
-    await cache_delete("profile:john")
-
-    # Decorator (for service methods):
-    @cached_async(key_fn=lambda pid: f"player_stats:{pid}", ttl=30)
-    async def get_stats(session, pid):
-        ...
-"""
+"""Reusable Redis cache helper — eliminates duplicate boilerplate across routers/services."""
 import json
 from functools import wraps
 from src.database.redis.redis_client import redis_client
@@ -69,17 +54,7 @@ async def cache_delete(*keys: str):
 
 
 def cached_async(key_fn, ttl: int = 60):
-    """Decorator for async functions. Caches return value in Redis.
-
-    key_fn: callable that receives the same args as the decorated function
-            and returns the cache key string.
-    ttl:    seconds to cache (default 60).
-
-    Example:
-        @cached_async(key_fn=lambda session, pid: f"player:{pid}", ttl=30)
-        async def get_player(session, pid):
-            ...
-    """
+    """Decorator for async functions. Caches return value in Redis."""
     def decorator(fn):
         @wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -90,7 +65,6 @@ def cached_async(key_fn, ttl: int = 60):
             result = await fn(*args, **kwargs)
             await cache_set(key, result, ttl)
             return result
-        # Expose invalidation helper on the wrapper
         wrapper.invalidate = lambda *a, **kw: cache_delete(key_fn(*a, **kw))
         return wrapper
     return decorator

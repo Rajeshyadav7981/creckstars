@@ -5,7 +5,7 @@ class CreateTeamRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=200)
     short_name: str | None = Field(None, max_length=10)
     logo_url: str | None = Field(None, max_length=500)
-    color: str | None = Field(None, max_length=7)  # hex color
+    color: str | None = Field(None, max_length=7)
     home_ground: str | None = Field(None, max_length=200)
     city: str | None = Field(None, max_length=100)
     latitude: float | None = None

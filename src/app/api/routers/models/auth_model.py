@@ -9,16 +9,15 @@ class RegisterRequest(BaseModel):
     email: str | None = None
     password: str
     profile: str | None = None
-    username: str | None = None  # Instagram-style @handle
-    # Cricket profile fields (optional at signup; fillable later in Edit Profile)
+    username: str | None = None
     bio: str | None = None
     city: str | None = None
     state_province: str | None = None
     country: str | None = None
     date_of_birth: date | None = None
-    batting_style: str | None = None   # 'right_hand' | 'left_hand'
-    bowling_style: str | None = None   # 'right_arm_fast' | etc.
-    player_role: str | None = None     # 'batsman' | 'bowler' | 'all_rounder' | 'wicket_keeper'
+    batting_style: str | None = None
+    bowling_style: str | None = None
+    player_role: str | None = None
 
 
 class LoginRequest(BaseModel):

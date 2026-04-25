@@ -1,4 +1,7 @@
+import secrets
+import string
 from sqlalchemy import select, text, delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.schemas.match_schema import MatchSchema
 from src.database.postgres.schemas.match_squad_schema import MatchSquadSchema
@@ -7,27 +10,36 @@ from src.database.postgres.schemas.innings_schema import InningsSchema
 from src.database.postgres.schemas.batting_scorecard_schema import BattingScorecardSchema
 from src.database.postgres.schemas.bowling_scorecard_schema import BowlingScorecardSchema
 
+_CODE_ALPHABET = string.ascii_uppercase + string.digits
+
+
+def _generate_match_code() -> str:
+    return "M" + "".join(secrets.choice(_CODE_ALPHABET) for _ in range(6))
+
 
 class MatchRepository:
+    """Repositories flush, services commit — see InningsRepository for the pattern."""
 
     @staticmethod
     async def create(session: AsyncSession, data: dict) -> MatchSchema:
-        # Auto-generate match code if not provided
-        if not data.get("match_code"):
-            import random, string
-            for _ in range(10):
-                code = "M" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-                existing = await session.execute(
-                    select(MatchSchema).where(MatchSchema.match_code == code)
-                )
-                if not existing.scalar_one_or_none():
-                    data["match_code"] = code
-                    break
-        match = MatchSchema(**data)
-        session.add(match)
-        await session.commit()
-        await session.refresh(match)
-        return match
+        # Relies on the DB UNIQUE constraint on matches.match_code: generate,
+        # insert, and retry on IntegrityError instead of a TOCTOU pre-check.
+        caller_supplied_code = bool(data.get("match_code"))
+        for _ in range(10):
+            if not caller_supplied_code:
+                data["match_code"] = _generate_match_code()
+            match = MatchSchema(**data)
+            session.add(match)
+            try:
+                await session.flush()
+                return match
+            except IntegrityError:
+                await session.rollback()
+                if caller_supplied_code:
+                    # Caller picked a colliding code — not something we can retry around.
+                    raise
+                # else: generated code collided; loop picks a new one.
+        raise RuntimeError("Could not generate a unique match_code after 10 attempts")
 
     @staticmethod
     async def get_by_id(session: AsyncSession, match_id: int) -> MatchSchema | None:
@@ -58,21 +70,12 @@ class MatchRepository:
         for_user: int = None, role: str = None,
         limit: int = 50, offset: int = 0,
     ) -> list:
-        """List matches with optional filters.
-
-        `for_user` (new): fetches matches where the user CREATED or PLAYED in
-        (i.e. their player profile appears in match_squads). Each returned
-        match gets a `.role` attribute: 'organized' | 'played' | 'both'.
-        This replaces the old `created_by`-only filter for "My Matches".
-
-        When `for_user` is set, `created_by` is ignored.
-        """
+        """List matches with optional filters; when `for_user` is set, fetches matches the user CREATED or PLAYED in (each row gets a `.role` attribute: organized|played|both) and `created_by` is ignored."""
         from src.database.postgres.schemas.team_schema import TeamSchema as TS
         from sqlalchemy.orm import load_only
         from sqlalchemy import or_, case, and_, literal_column
 
         if for_user:
-            # Single query: matches created by user OR where user's player is in squad.
             # Uses EXISTS subquery for "played" check — fast with indexes on
             # match_squads(match_id) and players(user_id).
             from src.database.postgres.schemas.player_schema import PlayerSchema
@@ -128,7 +131,6 @@ class MatchRepository:
                 matches.append(m)
             return matches
 
-        # Standard path (no for_user)
         query = select(MatchSchema).options(load_only(*MatchRepository._LIST_COLS))
         if status:
             query = query.where(MatchSchema.status == status)
@@ -149,40 +151,34 @@ class MatchRepository:
 
     @staticmethod
     async def update(session: AsyncSession, match_id: int, data: dict) -> MatchSchema | None:
-        result = await session.execute(select(MatchSchema).where(MatchSchema.id == match_id))
-        match = result.scalar_one_or_none()
-        if not match:
+        """Update match attributes; None values are skipped (uses session.get() so returned instance is ORM-attached)."""
+        filtered = {k: v for k, v in data.items() if v is not None}
+        if not filtered:
             return None
-        for key, value in data.items():
-            if value is not None:
-                setattr(match, key, value)
-        await session.commit()
-        await session.refresh(match)
+        match = await session.get(MatchSchema, match_id)
+        if match is None:
+            return None
+        for k, v in filtered.items():
+            setattr(match, k, v)
+        await session.flush()
         return match
 
     @staticmethod
     async def set_squad(session: AsyncSession, entries: list[dict]) -> list:
         if not entries:
             return []
-        # Delete existing squad for this match+team first (allows re-selection)
         match_id = entries[0]["match_id"]
         team_id = entries[0]["team_id"]
+        # Single round-trip: delete old rows. add_all inserts the new ones in a batch.
         await session.execute(
             delete(MatchSquadSchema).where(
                 MatchSquadSchema.match_id == match_id,
                 MatchSquadSchema.team_id == team_id,
             )
         )
+        squads = [MatchSquadSchema(**entry) for entry in entries]
+        session.add_all(squads)
         await session.flush()
-        # Insert fresh squad
-        squads = []
-        for entry in entries:
-            sq = MatchSquadSchema(**entry)
-            session.add(sq)
-            squads.append(sq)
-        await session.commit()
-        for sq in squads:
-            await session.refresh(sq)
         return squads
 
     @staticmethod
@@ -227,13 +223,7 @@ class MatchRepository:
 
     @staticmethod
     async def get_batting_aggregates_by_tournament(session: AsyncSession, tournament_id: int) -> list:
-        """Per-player batting totals across all completed matches in a tournament.
-
-        Single GROUP BY query — replaces fetching every batting_scorecard row
-        and aggregating in Python. Returns: (player_id, full_name, matches,
-        innings, total_runs, total_balls, total_fours, total_sixes,
-        highest_score). Sorted by total runs desc.
-        """
+        """Per-player batting totals across all completed matches — single GROUP BY replaces per-row aggregation in Python."""
         from sqlalchemy import func as sa_func, distinct
         result = await session.execute(
             select(
@@ -260,10 +250,7 @@ class MatchRepository:
     async def get_top_batting_innings_by_tournament(
         session: AsyncSession, tournament_id: int, limit: int = 20
     ) -> list:
-        """Top individual batting innings (for the 'highest scores' panel).
-        Sorted by runs desc; only fetches `limit` rows. Replaces the in-memory
-        sort over every batting row in the tournament.
-        """
+        """Top individual batting innings sorted by runs desc; fetches only `limit` rows instead of in-memory sort over every row."""
         result = await session.execute(
             select(
                 PlayerSchema.id.label("player_id"),
@@ -314,13 +301,7 @@ class MatchRepository:
 
     @staticmethod
     async def get_bowling_aggregates_by_tournament(session: AsyncSession, tournament_id: int) -> list:
-        """Per-player bowling totals across all completed matches.
-
-        Single GROUP BY query — replaces fetching every bowling_scorecard row
-        and aggregating in Python. Returns: (player_id, full_name, matches,
-        innings, total_wickets, total_runs_conceded, total_overs, total_maidens,
-        total_dot_balls). Sorted by wickets desc.
-        """
+        """Per-player bowling totals across all completed matches — single GROUP BY replaces per-row aggregation in Python."""
         from sqlalchemy import func as sa_func, distinct
         result = await session.execute(
             select(
@@ -347,12 +328,7 @@ class MatchRepository:
     async def get_best_bowling_figures_by_tournament(
         session: AsyncSession, tournament_id: int
     ) -> list:
-        """Per-player best bowling figures (max wickets, tiebreak min runs).
-
-        Uses Postgres `DISTINCT ON` so each player gets one row — the row
-        with their best single-innings figures. Joins back to the aggregate
-        result in Python via player_id.
-        """
+        """Per-player best bowling figures via Postgres DISTINCT ON (max wickets, tiebreak min runs); joined back to aggregates by player_id."""
         result = await session.execute(
             select(
                 BowlingScorecardSchema.player_id,

@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS user_follows (
 );
 CREATE INDEX IF NOT EXISTS ix_follows_following ON user_follows (following_id);
 CREATE INDEX IF NOT EXISTS ix_follows_follower ON user_follows (follower_id);
+-- Composite indexes that cover (filter, sort) for keyset pagination on the
+-- followers/following lists. A plain (following_id) index forces a sort step
+-- per request — at millions of follows that's a spill to disk.
+CREATE INDEX IF NOT EXISTS ix_follows_following_created ON user_follows (following_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_follows_follower_created ON user_follows (follower_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS otps (
     id SERIAL PRIMARY KEY,
@@ -72,6 +77,7 @@ CREATE TABLE IF NOT EXISTS otps (
     expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_otps_mobile ON otps (mobile);
+CREATE INDEX IF NOT EXISTS ix_otp_mobile_purpose_verified ON otps (mobile, purpose, is_verified, expires_at DESC);
 
 
 -- ═══════════════════════════════════════
@@ -99,6 +105,8 @@ CREATE TABLE IF NOT EXISTS players (
     last_name VARCHAR(100),
     full_name VARCHAR(200) NOT NULL,
     mobile VARCHAR(15),
+    -- Deliberate unlinkable stub (kid / walk-in / no phone). Never auto-links.
+    is_guest BOOLEAN NOT NULL DEFAULT FALSE,
     date_of_birth DATE,
     bio TEXT,
     city VARCHAR(100),
@@ -114,6 +122,10 @@ CREATE TABLE IF NOT EXISTS players (
 );
 CREATE INDEX IF NOT EXISTS ix_players_created_by ON players (created_by);
 CREATE INDEX IF NOT EXISTS ix_players_user_id ON players (user_id);
+-- Fast lookup for the auto-link path (WHERE mobile = :m AND user_id IS NULL).
+CREATE INDEX IF NOT EXISTS ix_players_mobile_stub ON players (mobile) WHERE user_id IS NULL;
+-- Backfill column on existing DBs that predate this commit.
+ALTER TABLE players ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS teams (
     id SERIAL PRIMARY KEY,
@@ -326,6 +338,8 @@ CREATE INDEX IF NOT EXISTS ix_deliveries_innings ON deliveries (innings_id);
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_over_ball ON deliveries (innings_id, over_number, ball_number);
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_seq ON deliveries (innings_id, actual_ball_seq DESC);
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_created ON deliveries (innings_id, created_at DESC);
+-- Guard against duplicate deliveries per innings under concurrent scoring.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_innings_seq ON deliveries (innings_id, actual_ball_seq);
 
 CREATE TABLE IF NOT EXISTS overs (
     id SERIAL PRIMARY KEY,
@@ -421,6 +435,7 @@ CREATE TABLE IF NOT EXISTS match_events (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_match_events_match_seq ON match_events (match_id, sequence_number);
+CREATE INDEX IF NOT EXISTS ix_match_events_match_seq_desc ON match_events (match_id, sequence_number DESC);
 
 
 -- ═══════════════════════════════════════

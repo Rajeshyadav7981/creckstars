@@ -1,4 +1,4 @@
-from sqlalchemy import select, or_, case
+from sqlalchemy import select, or_, case, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 from src.database.postgres.schemas.user_schema import UserSchema
@@ -60,14 +60,29 @@ class UserRepository:
         return user
 
     @staticmethod
-    async def search(session: AsyncSession, query: str, limit: int = 20) -> list[UserSchema]:
-        """Search users with priority: username prefix > username contains > name contains.
-        Uses pg_trgm GIN indexes for fast substring matching."""
-        search_fields = load_only(
-            UserSchema.id, UserSchema.username, UserSchema.full_name,
-            UserSchema.first_name, UserSchema.last_name, UserSchema.profile,
+    async def search(session: AsyncSession, query: str, limit: int = 20) -> list[tuple]:
+        """Search users with priority (username prefix > username contains > name contains) using pg_trgm GIN indexes; returns (user, player_id) rows to avoid N+1 on cricket-profile link."""
+        from src.database.postgres.schemas.player_schema import PlayerSchema
+        # Subquery: cheapest linked player per user (MIN picks lowest id, which
+        # is the first stub/user row ever created). LATERAL would be tidier but
+        # GROUP BY is simpler and the player→user mapping is 1:1 in practice.
+        player_link = (
+            select(
+                PlayerSchema.user_id.label("uid"),
+                func.min(PlayerSchema.id).label("pid"),
+            )
+            .where(PlayerSchema.user_id.isnot(None))
+            .group_by(PlayerSchema.user_id)
+            .subquery()
         )
-        q = select(UserSchema).options(search_fields)
+        q = (
+            select(UserSchema, player_link.c.pid)
+            .outerjoin(player_link, player_link.c.uid == UserSchema.id)
+            .options(load_only(
+                UserSchema.id, UserSchema.username, UserSchema.full_name,
+                UserSchema.first_name, UserSchema.last_name, UserSchema.profile,
+            ))
+        )
         if query and query.strip():
             ql = query.strip().lower()
             q = q.where(or_(
@@ -85,4 +100,4 @@ class UserRepository:
         else:
             q = q.order_by(UserSchema.full_name)
         result = await session.execute(q.limit(limit))
-        return list(result.scalars().all())
+        return list(result.all())

@@ -11,8 +11,6 @@ class MatchCache:
     async def _get_redis():
         return await redis_client.get_client()
 
-    # --- Live state ---
-
     @staticmethod
     async def get_live_state(match_id: int):
         try:
@@ -35,8 +33,6 @@ class MatchCache:
             await r.set(key, json.dumps(data, default=str), ex=ttl)
         except Exception as e:
             logger.warning(f"Redis operation failed: {e}")
-
-    # --- Scorecard ---
 
     @staticmethod
     async def get_scorecard(match_id: int):
@@ -62,8 +58,6 @@ class MatchCache:
         except Exception as e:
             logger.warning(f"Redis operation failed: {e}")
 
-    # --- Current over (existing) ---
-
     @staticmethod
     async def set_current_over(match_id: int, balls: list):
         try:
@@ -84,8 +78,6 @@ class MatchCache:
         except Exception as e:
             logger.warning(f"Redis operation failed: {e}")
             return []
-
-    # --- Admin broadcast message ---
 
     @staticmethod
     async def set_broadcast_message(match_id: int, message: str, ttl: int = 600):
@@ -114,8 +106,6 @@ class MatchCache:
             await r.delete(f"match:{match_id}:broadcast")
         except Exception as e:
             logger.warning(f"Redis operation failed: {e}")
-
-    # --- Squad cache ---
 
     @staticmethod
     async def get_squad(match_id: int, team_id: int):

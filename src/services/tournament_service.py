@@ -143,7 +143,6 @@ class TournamentService:
         # Build team lookup
         team_map = {t.id: t for t in teams}
 
-        # Initialize standings for each team
         standings = {}
         for t in teams:
             standings[t.id] = {
@@ -357,7 +356,10 @@ class TournamentService:
                 DeliverySchema.fielder_id.isnot(None),
             )
             .group_by(DeliverySchema.fielder_id, PlayerSchema.full_name)
-            .order_by(total_expr.desc())
+            # "Best fielder" = most catches. Ties broken by total contributions
+            # (run-outs + stumpings) so a pure fielder with 6 catches still beats
+            # a keeper with 6 stumpings-only.
+            .order_by(catches_expr.desc(), total_expr.desc())
         )
         fielders_list = [{
             "player_id": r.player_id,

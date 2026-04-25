@@ -1,9 +1,11 @@
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.schemas.player_schema import PlayerSchema
 from src.database.postgres.schemas.team_schema import TeamSchema
 from src.database.postgres.schemas.innings_schema import InningsSchema
+from src.database.postgres.schemas.match_schema import MatchSchema
 from src.database.postgres.repositories.innings_repository import InningsRepository
 from src.database.postgres.repositories.delivery_repository import DeliveryRepository
 from src.database.postgres.repositories.scorecard_repository import ScorecardRepository
@@ -21,11 +23,16 @@ class ScoringService:
 
     @staticmethod
     async def record_delivery(session: AsyncSession, match_id: int, user_id: int, data: dict):
-        match = await MatchRepository.get_by_id(session, match_id)
+        # Lock the match row first so two concurrent requests can't read a stale
+        # current_innings. This serialises all mutations for a given match.
+        match_res = await session.execute(
+            select(MatchSchema).where(MatchSchema.id == match_id).with_for_update()
+        )
+        match = match_res.scalar_one_or_none()
         if not match or match.status != "live":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
 
-        # Lock the innings row to prevent race conditions on concurrent scoring
+        # Lock the innings row too — prevents races if current_innings advances mid-request.
         result = await session.execute(
             select(InningsSchema)
             .where(InningsSchema.match_id == match_id, InningsSchema.innings_number == match.current_innings)
@@ -146,7 +153,28 @@ class ScoringService:
         if extra_type in ("bye", "legbye"):
             runs_to_batsman = 0  # byes/legbyes don't go to batsman
 
-        batting_card = await ScorecardRepository.get_or_create_batting(session, innings.id, striker_id)
+        # Bulk-fetch every scorecard row we might touch on this delivery in TWO queries
+        # (batting set + bowling set) instead of 3–5 sequential SELECTs. The hot path
+        # is ~120 deliveries/min per match, so this is the single biggest win.
+        is_wicket_flag = bool(is_wicket)
+        dismissed_id_pf = (data.get("dismissed_player_id") or striker_id) if is_wicket_flag else None
+        new_batsman_id_pf = data.get("new_batsman_id") if is_wicket_flag else None
+        batting_ids_to_fetch = [striker_id]
+        if dismissed_id_pf and dismissed_id_pf not in batting_ids_to_fetch:
+            batting_ids_to_fetch.append(dismissed_id_pf)
+        if new_batsman_id_pf and new_batsman_id_pf not in batting_ids_to_fetch:
+            batting_ids_to_fetch.append(new_batsman_id_pf)
+
+        batting_map = await ScorecardRepository.get_batting_cards_for_players(
+            session, innings.id, batting_ids_to_fetch
+        )
+        bowling_map = await ScorecardRepository.get_bowling_cards_for_players(
+            session, innings.id, [bowler_id]
+        )
+
+        batting_card = await ScorecardRepository.ensure_batting_card(
+            session, innings.id, striker_id, batting_map.get(striker_id)
+        )
         new_runs = batting_card.runs + runs_to_batsman
         # Ball faced: legal deliveries + no-balls count (batsman faces the ball).
         # Only wides don't count as ball faced (batsman didn't play it).
@@ -155,18 +183,18 @@ class ScoringService:
         new_fours = batting_card.fours + (1 if is_boundary and not is_six else 0)
         new_sixes = batting_card.sixes + (1 if is_six else 0)
         new_sr = (new_runs / new_balls * 100) if new_balls > 0 else 0.0
-        await ScorecardRepository.update_batting(session, batting_card, {
-            "runs": new_runs,
-            "balls_faced": new_balls,
-            "fours": new_fours,
-            "sixes": new_sixes,
-            "strike_rate": round(new_sr, 2),
-        })
+        batting_card.runs = new_runs
+        batting_card.balls_faced = new_balls
+        batting_card.fours = new_fours
+        batting_card.sixes = new_sixes
+        batting_card.strike_rate = round(new_sr, 2)
 
         # Update bowling scorecard
         # Leg byes and byes are extras NOT charged to the bowler
         # Wides and no-balls ARE charged to the bowler
-        bowling_card = await ScorecardRepository.get_or_create_bowling(session, innings.id, bowler_id)
+        bowling_card = await ScorecardRepository.ensure_bowling_card(
+            session, innings.id, bowler_id, bowling_map.get(bowler_id)
+        )
         if extra_type in ("bye", "legbye"):
             bowl_runs = 0  # Byes/leg byes don't count against bowler
         else:
@@ -214,7 +242,9 @@ class ScoringService:
         # Handle wicket
         if is_wicket:
             dismissed_id = data.get("dismissed_player_id") or striker_id
-            batting_card_dismissed = await ScorecardRepository.get_or_create_batting(session, innings.id, dismissed_id)
+            batting_card_dismissed = await ScorecardRepository.ensure_batting_card(
+                session, innings.id, dismissed_id, batting_map.get(dismissed_id)
+            )
             wicket_type = data.get("wicket_type", "out")
             fielder_id = data.get("fielder_id")
 
@@ -263,8 +293,10 @@ class ScoringService:
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="New batsman must be from the batting team's squad"
                     )
-                # Validate new batsman is not already dismissed
-                existing_card = await ScorecardRepository.get_or_create_batting(session, innings.id, new_batsman_id)
+                # Validate new batsman is not already dismissed (reuse the prefetched card).
+                existing_card = await ScorecardRepository.ensure_batting_card(
+                    session, innings.id, new_batsman_id, batting_map.get(new_batsman_id)
+                )
                 if existing_card.is_out:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
@@ -400,7 +432,17 @@ class ScoringService:
                     card.how_out = "not out"
             await session.flush()
 
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as ie:
+            # Hit the ux_deliveries_innings_seq guard — concurrent writer raced us.
+            # Roll back and ask the client to retry rather than returning 500.
+            await session.rollback()
+            logger.warning(f"Duplicate ball seq on match {match_id}: {ie.orig}")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Another delivery is being recorded — retry in a moment.",
+            )
 
         logger.info(f"Delivery: match={match_id} runs={total_runs} wicket={is_wicket} overs={new_total_overs}")
 
@@ -431,7 +473,10 @@ class ScoringService:
 
     @staticmethod
     async def end_over(session: AsyncSession, match_id: int, next_bowler_id: int):
-        match = await MatchRepository.get_by_id(session, match_id)
+        match_res = await session.execute(
+            select(MatchSchema).where(MatchSchema.id == match_id).with_for_update()
+        )
+        match = match_res.scalar_one_or_none()
         if not match or match.status != "live":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
 
@@ -631,7 +676,10 @@ class ScoringService:
     @staticmethod
     async def swap_batters(session: AsyncSession, match_id: int):
         """Manually swap striker and non-striker. Not a cricket rule — admin option."""
-        match = await MatchRepository.get_by_id(session, match_id)
+        match_res = await session.execute(
+            select(MatchSchema).where(MatchSchema.id == match_id).with_for_update()
+        )
+        match = match_res.scalar_one_or_none()
         if not match or match.status != "live":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
 

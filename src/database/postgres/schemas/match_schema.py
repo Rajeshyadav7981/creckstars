@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Date, ForeignKey, Text, Boolean, func
+from sqlalchemy import Column, Integer, String, DateTime, Date, ForeignKey, Text, func
 from src.database.postgres.db import Base
 
 

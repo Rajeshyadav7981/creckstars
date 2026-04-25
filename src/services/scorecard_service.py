@@ -5,8 +5,9 @@ from src.database.postgres.repositories.delivery_repository import DeliveryRepos
 from src.database.postgres.repositories.match_repository import MatchRepository
 from src.database.postgres.schemas.player_schema import PlayerSchema
 from src.database.postgres.schemas.team_schema import TeamSchema
+from src.database.postgres.schemas.user_schema import UserSchema
 from src.services.dls_service import calculate_dls_par_score
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import load_only
 
 
@@ -46,7 +47,6 @@ class ScorecardService:
         all_bowling = await ScorecardRepository.get_bowling_for_innings_ids(session, innings_ids)
         all_fow = await ScorecardRepository.get_fall_of_wickets_for_innings_ids(session, innings_ids)
         all_partnerships = await ScorecardRepository.get_partnerships_for_innings_ids(session, innings_ids)
-        # Per-over roll-up for chart series ({over, runs, wickets}). Single GROUP BY query.
         all_over_aggs = await DeliveryRepository.get_over_aggregates_for_innings_ids(session, innings_ids)
         over_series_by_inn = defaultdict(list)
         for row in all_over_aggs:
@@ -81,12 +81,22 @@ class ScorecardService:
             if p.player_a_id: all_player_ids.add(p.player_a_id)
             if p.player_b_id: all_player_ids.add(p.player_b_id)
         all_player_names = {}
+        all_player_profiles = {}
         if all_player_ids:
+            # LEFT JOIN users so a linked user's uploaded photo is used when the
+            # player's own profile_image is blank. Covers the common case where
+            # a real user registered and got mapped to a player record.
+            profile_expr = func.coalesce(PlayerSchema.profile_image, UserSchema.profile).label("profile")
             pres = await session.execute(
-                select(PlayerSchema.id, PlayerSchema.full_name)
+                select(PlayerSchema.id, PlayerSchema.full_name, profile_expr)
+                .select_from(PlayerSchema)
+                .outerjoin(UserSchema, UserSchema.id == PlayerSchema.user_id)
                 .where(PlayerSchema.id.in_(all_player_ids))
             )
-            all_player_names = {pid: pname for pid, pname in pres.all()}
+            for pid, pname, profile in pres.all():
+                all_player_names[pid] = pname
+                if profile:
+                    all_player_profiles[pid] = profile
 
         for inn in innings_list:
             batting = batting_by_inn.get(inn.id, [])
@@ -100,6 +110,7 @@ class ScorecardService:
                 batting_cards.append({
                     "player_id": b.player_id,
                     "player_name": player_names.get(b.player_id, ""),
+                    "profile": all_player_profiles.get(b.player_id),
                     "batting_position": b.batting_position,
                     "runs": b.runs,
                     "balls_faced": b.balls_faced,
@@ -115,6 +126,7 @@ class ScorecardService:
                 bowling_cards.append({
                     "player_id": b.player_id,
                     "player_name": player_names.get(b.player_id, ""),
+                    "profile": all_player_profiles.get(b.player_id),
                     "overs_bowled": b.overs_bowled,
                     "maidens": b.maidens,
                     "runs_conceded": b.runs_conceded,
@@ -171,7 +183,6 @@ class ScorecardService:
                 "over_series": over_series_by_inn.get(inn.id, []),
             })
 
-        # Compute top performers for completed matches
         if match.status == "completed" and result["innings"]:
             result["top_performers"] = ScorecardService._compute_top_performers(result["innings"])
 
@@ -179,14 +190,7 @@ class ScorecardService:
 
     @staticmethod
     def _compute_top_performers(innings_list: list) -> dict:
-        """Derive Player of the Match, best batters, best bowlers from scorecard data.
-
-        POM scoring follows ICC-style weighted impact system:
-        - Batting: runs weighted by match context + milestone bonuses + SR bonus
-        - Bowling: wickets heavily weighted + economy bonus + dot ball pressure
-        - Match-winning contribution gets a bonus (winning team players)
-        - Catches/run-outs (fielding) bonus via dismissal involvement
-        """
+        """Derive Player of the Match, best batters, best bowlers from scorecard data."""
         all_batters = []
         all_bowlers = []
         winning_team_id = None
@@ -214,7 +218,6 @@ class ScorecardService:
 
         player_scores = {}
 
-        # ── Batting scoring ──
         for b in all_batters:
             pid = b["player_id"]
             runs = b.get("runs", 0)
@@ -222,7 +225,6 @@ class ScorecardService:
             fours = b.get("fours", 0)
             sixes = b.get("sixes", 0)
 
-            # Base: 1 point per run
             bat_score = runs
 
             # Boundary bonus: reward aggressive batting
@@ -257,13 +259,15 @@ class ScorecardService:
 
             player_scores.setdefault(pid, {
                 "player_id": pid, "player_name": b["player_name"],
+                "profile": b.get("profile"),
                 "score": 0, "batting": None, "bowling": None
             })
             player_scores[pid]["score"] += bat_score
+            if b.get("profile") and not player_scores[pid].get("profile"):
+                player_scores[pid]["profile"] = b.get("profile")
             if not player_scores[pid]["batting"] or runs > player_scores[pid]["batting"].get("runs", 0):
                 player_scores[pid]["batting"] = b
 
-        # ── Bowling scoring ──
         for bw in all_bowlers:
             pid = bw["player_id"]
             wickets = bw.get("wickets", 0)
@@ -273,7 +277,6 @@ class ScorecardService:
             dots = bw.get("dot_balls", 0)
             runs_conceded = bw.get("runs_conceded", 0)
 
-            # Base: 25 per wicket (wickets are the most valuable bowling contribution)
             bowl_score = wickets * 25
 
             # Multi-wicket haul bonuses (ICC-style)
@@ -296,22 +299,22 @@ class ScorecardService:
             # Dot ball pressure (building pressure is crucial)
             bowl_score += dots * 1
 
-            # Maiden over bonus
             bowl_score += maidens * 8
 
-            # Winning team bonus
             if winning_team_id and bw.get("team_id") == winning_team_id:
                 bowl_score = int(bowl_score * 1.15)
 
             player_scores.setdefault(pid, {
                 "player_id": pid, "player_name": bw["player_name"],
+                "profile": bw.get("profile"),
                 "score": 0, "batting": None, "bowling": None
             })
             player_scores[pid]["score"] += bowl_score
+            if bw.get("profile") and not player_scores[pid].get("profile"):
+                player_scores[pid]["profile"] = bw.get("profile")
             if not player_scores[pid]["bowling"] or wickets > (player_scores[pid]["bowling"] or {}).get("wickets", 0):
                 player_scores[pid]["bowling"] = bw
 
-        # ── Fielding bonus (from dismissal records) ──
         for inn in innings_list:
             for b in inn.get("batting", []):
                 if b.get("is_out") and b.get("fielder_id"):
@@ -345,6 +348,9 @@ class ScorecardService:
             pom_data = {
                 "player_id": pom["player_id"],
                 "player_name": pom["player_name"],
+                "profile": pom.get("profile"),
+                "team_name": (pom.get("batting") or {}).get("team_name")
+                    or (pom.get("bowling") or {}).get("team_name"),
                 "batting": pom["batting"],
                 "bowling": pom["bowling"],
             }
@@ -357,30 +363,34 @@ class ScorecardService:
         }
 
     @staticmethod
+    async def _team_name_map(session, team_ids):
+        ids = [t for t in team_ids if t]
+        if not ids:
+            return {}
+        r = await session.execute(
+            select(TeamSchema.id, TeamSchema.name).where(TeamSchema.id.in_(ids))
+        )
+        return {tid: tname for tid, tname in r.all()}
+
+    @staticmethod
     async def get_live_state(session: AsyncSession, match_id: int):
+        # Viewer poll hits this every ~1 second, so we consolidate fetches aggressively.
         match = await MatchRepository.get_by_id(session, match_id)
         if not match:
             return None
 
+        # Fetch every innings for this match in one query — reused across the
+        # completed / break / live branches instead of three separate SELECTs.
+        all_innings = await InningsRepository.get_by_match(session, match_id)
+
         if match.status == "completed":
-            # Pull the latest innings so the frontend can render a rich
-            # "match over" card (team / score / overs / target) instead of a
-            # bare stub. Keeps the screen visually consistent with the
-            # innings-break dialog.
-            all_innings = await InningsRepository.get_by_match(session, match_id)
             last_inn = all_innings[-1] if all_innings else None
-            batting_team_name = None
-            bowling_team_name = None
+            batting_team_name = bowling_team_name = None
             target = None
             if last_inn:
-                # Batched team-name lookup (1 query instead of 2 session.get round-trips)
-                _ids = [t for t in [last_inn.batting_team_id, last_inn.bowling_team_id] if t]
-                _names = {}
-                if _ids:
-                    _r = await session.execute(
-                        select(TeamSchema.id, TeamSchema.name).where(TeamSchema.id.in_(_ids))
-                    )
-                    _names = {tid: tname for tid, tname in _r.all()}
+                _names = await ScorecardService._team_name_map(
+                    session, (last_inn.batting_team_id, last_inn.bowling_team_id)
+                )
                 batting_team_name = _names.get(last_inn.batting_team_id)
                 bowling_team_name = _names.get(last_inn.bowling_team_id)
                 target = last_inn.target
@@ -390,7 +400,6 @@ class ScorecardService:
                 "message": "Match completed",
                 "result_summary": match.result_summary,
                 "winner_id": match.winner_id,
-                # Last innings data for rich UI rendering
                 "innings_number": last_inn.innings_number if last_inn else None,
                 "batting_team_id": last_inn.batting_team_id if last_inn else None,
                 "bowling_team_id": last_inn.bowling_team_id if last_inn else None,
@@ -406,30 +415,24 @@ class ScorecardService:
         if not match.current_innings:
             return {"match_id": match_id, "status": match.status, "message": "Match not started"}
 
-        innings_list = await InningsRepository.get_by_match(session, match_id, match.current_innings)
-        if not innings_list:
+        innings = next((i for i in all_innings if i.innings_number == match.current_innings), None)
+        if not innings:
             return {"match_id": match_id, "status": match.status}
-        innings = innings_list[0]
 
         # Detect innings break: innings completed but match still live (waiting for next innings)
         if innings.status == "completed" and match.status == "live":
-            # Batched team-name lookup (1 query instead of 2 session.get round-trips)
-            _ids = [t for t in [innings.batting_team_id, innings.bowling_team_id] if t]
-            _names = {}
-            if _ids:
-                _r = await session.execute(
-                    select(TeamSchema.id, TeamSchema.name).where(TeamSchema.id.in_(_ids))
-                )
-                _names = {tid: tname for tid, tname in _r.all()}
+            _names = await ScorecardService._team_name_map(
+                session, (innings.batting_team_id, innings.bowling_team_id)
+            )
             bat_name = _names.get(innings.batting_team_id) or "Team"
             bowl_name = _names.get(innings.bowling_team_id) or "Team"
             is_super_over = innings.innings_number > 2
 
-            # Detect tie: for even innings (2nd of pair), compare with previous innings
+            # Detect tie: compare with previous innings from the same pre-fetched list.
             is_tied = False
             if innings.innings_number >= 2 and innings.innings_number % 2 == 0:
-                prev_inn = await InningsRepository.get_by_match(session, match_id, innings.innings_number - 1)
-                if prev_inn and prev_inn[0].total_runs == innings.total_runs:
+                prev = next((i for i in all_innings if i.innings_number == innings.innings_number - 1), None)
+                if prev and prev.total_runs == innings.total_runs:
                     is_tied = True
 
             return {
@@ -448,64 +451,75 @@ class ScorecardService:
                 "message": f"{'Super Over' if is_super_over else 'Innings'} {innings.innings_number} completed. {bat_name} scored {innings.total_runs}/{innings.total_wickets}",
             }
 
-        # Get team names — single batched query instead of two session.get() round-trips
-        team_ids_for_innings = [t for t in [innings.batting_team_id, innings.bowling_team_id] if t]
-        team_name_lookup = {}
-        if team_ids_for_innings:
-            t_res = await session.execute(
-                select(TeamSchema.id, TeamSchema.name).where(TeamSchema.id.in_(team_ids_for_innings))
-            )
-            team_name_lookup = {tid: tname for tid, tname in t_res.all()}
+        team_name_lookup = await ScorecardService._team_name_map(
+            session, (innings.batting_team_id, innings.bowling_team_id)
+        )
         batting_team_name = team_name_lookup.get(innings.batting_team_id) or "Team A"
         bowling_team_name = team_name_lookup.get(innings.bowling_team_id) or "Team B"
 
-        # Get player names
-        player_ids = [innings.current_striker_id, innings.current_non_striker_id, innings.current_bowler_id]
+        # Batch-load player names and scorecards for striker + non-striker + bowler.
+        # Previously: 3 get_or_create round-trips. Now: 1 batting bulk + 1 bowling
+        # bulk + 1 player-name query = 3 queries, regardless of missing cards.
+        striker_id = innings.current_striker_id
+        non_striker_id = innings.current_non_striker_id
+        bowler_id = innings.current_bowler_id
+        all_player_ids = [p for p in (striker_id, non_striker_id, bowler_id) if p]
+
         player_names = {}
-        if any(player_ids):
-            res = await session.execute(select(PlayerSchema).options(load_only(PlayerSchema.id, PlayerSchema.full_name)).where(PlayerSchema.id.in_([p for p in player_ids if p])))
+        if all_player_ids:
+            res = await session.execute(
+                select(PlayerSchema)
+                .options(load_only(PlayerSchema.id, PlayerSchema.full_name))
+                .where(PlayerSchema.id.in_(all_player_ids))
+            )
             for p in res.scalars().all():
                 player_names[p.id] = p.full_name
 
-        # Striker batting card
-        striker_info = None
-        if innings.current_striker_id:
-            card = await ScorecardRepository.get_or_create_batting(session, innings.id, innings.current_striker_id)
-            striker_info = {
+        batting_map = await ScorecardRepository.get_batting_cards_for_players(
+            session, innings.id, [striker_id, non_striker_id]
+        )
+        bowling_map = await ScorecardRepository.get_bowling_cards_for_players(
+            session, innings.id, [bowler_id]
+        )
+
+        def _bat_info(pid):
+            if not pid:
+                return None
+            card = batting_map.get(pid)
+            # Live state is a read-only poll; if the card isn't there yet we surface
+            # zeros rather than creating one (creating during a GET would force a
+            # write-lock each poll). The card gets lazily created on the next scored ball.
+            if card is None:
+                return {
+                    "player_id": pid, "name": player_names.get(pid, ""),
+                    "runs": 0, "balls": 0, "fours": 0, "sixes": 0, "strike_rate": 0.0,
+                }
+            return {
                 "player_id": card.player_id,
                 "name": player_names.get(card.player_id, ""),
-                "runs": card.runs,
-                "balls": card.balls_faced,
-                "fours": card.fours,
-                "sixes": card.sixes,
+                "runs": card.runs, "balls": card.balls_faced,
+                "fours": card.fours, "sixes": card.sixes,
                 "strike_rate": card.strike_rate,
             }
 
-        non_striker_info = None
-        if innings.current_non_striker_id:
-            card = await ScorecardRepository.get_or_create_batting(session, innings.id, innings.current_non_striker_id)
-            non_striker_info = {
-                "player_id": card.player_id,
-                "name": player_names.get(card.player_id, ""),
-                "runs": card.runs,
-                "balls": card.balls_faced,
-                "fours": card.fours,
-                "sixes": card.sixes,
-                "strike_rate": card.strike_rate,
-            }
+        striker_info = _bat_info(striker_id)
+        non_striker_info = _bat_info(non_striker_id)
 
         bowler_info = None
-        if innings.current_bowler_id:
-            bcard = await ScorecardRepository.get_or_create_bowling(session, innings.id, innings.current_bowler_id)
-            bowler_info = {
-                "player_id": bcard.player_id,
-                "name": player_names.get(bcard.player_id, ""),
-                "overs": bcard.overs_bowled,
-                "maidens": bcard.maidens,
-                "runs": bcard.runs_conceded,
-                "wickets": bcard.wickets,
-                "economy": bcard.economy_rate,
-            }
+        if bowler_id:
+            bcard = bowling_map.get(bowler_id)
+            if bcard is None:
+                bowler_info = {
+                    "player_id": bowler_id, "name": player_names.get(bowler_id, ""),
+                    "overs": 0.0, "maidens": 0, "runs": 0, "wickets": 0, "economy": 0.0,
+                }
+            else:
+                bowler_info = {
+                    "player_id": bcard.player_id, "name": player_names.get(bcard.player_id, ""),
+                    "overs": bcard.overs_bowled, "maidens": bcard.maidens,
+                    "runs": bcard.runs_conceded, "wickets": bcard.wickets,
+                    "economy": bcard.economy_rate,
+                }
 
         # Fetch dismissed player IDs — single narrow query instead of loading
         # all batting cards. This runs on every live_state poll (~1/s).

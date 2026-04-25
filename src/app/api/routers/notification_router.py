@@ -19,7 +19,6 @@ async def register_push_token(
     token = data.token
     device_type = data.device_type or "unknown"
 
-    # Upsert: update if exists, insert if new
     existing = await session.execute(
         select(PushTokenSchema).where(
             PushTokenSchema.user_id == user.id,

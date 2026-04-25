@@ -1,6 +1,8 @@
+import os
+import uuid
 from typing import Optional
 from datetime import date
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
@@ -23,6 +25,15 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Banner uploads live alongside other user-generated media on the VM disk
+# (separate folder so tournament assets are easy to back up / audit apart
+# from community post images).
+UPLOADS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
+    "uploads",
+)
+MAX_BANNER_SIZE = 10 * 1024 * 1024  # 10 MB
+
 
 class ScheduleMatchItem(BaseModel):
     match_id: int
@@ -34,6 +45,59 @@ class ScheduleMatchesRequest(BaseModel):
     schedule: list[ScheduleMatchItem]
 
 router = APIRouter(prefix="/api/tournaments", tags=["Tournaments"])
+
+
+@router.post("/upload-banner")
+@limiter.limit("10/minute")
+async def upload_tournament_banner(
+    request: Request,
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+):
+    """Upload a tournament banner image.
+
+    Stores under ``uploads/tournaments/`` on the VM disk and returns the
+    public URL the client can set as ``banner_url`` on tournament create/
+    update. Same hardening as the profile-photo endpoint: Pillow validates
+    the bytes, EXIF is stripped by re-encoding to JPEG, filename is server-
+    generated, and the resolved path is confined to the target directory.
+    """
+    import io
+    from PIL import Image as PILImage, UnidentifiedImageError
+
+    content_type = (file.content_type or "").lower()
+    if content_type and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    if len(content) > MAX_BANNER_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Max 10 MB.")
+
+    try:
+        img = PILImage.open(io.BytesIO(content))
+        img.verify()
+        img = PILImage.open(io.BytesIO(content))
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=400, detail="File is not a valid image.")
+
+    # Banner is landscape — compressor caps at 1600px wide and lands ≤ 2 MB.
+    from src.utils.image_compress import compress_to_target_size
+    content = compress_to_target_size(img, target_bytes=2 * 1024 * 1024, max_width=1600)
+
+    tournaments_dir = os.path.join(UPLOADS_DIR, "tournaments")
+    os.makedirs(tournaments_dir, exist_ok=True)
+    filename = f"{user.id}_{uuid.uuid4().hex}.jpg"
+    filepath = os.path.join(tournaments_dir, filename)
+    resolved = os.path.realpath(filepath)
+    if not resolved.startswith(os.path.realpath(tournaments_dir) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid upload path.")
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    image_url = f"/uploads/tournaments/{filename}"
+    return {"image_url": image_url, "banner_url": image_url}
 
 
 @router.post("")
@@ -277,14 +341,14 @@ async def get_tournament_standings(
         if cached:
             return cached
     except Exception as _e:
-        pass  # logged below not to crash hot path
+        logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
     standings = await TournamentService.get_standings(session, tournament_id)
     result = {"tournament_id": tournament_id, "standings": standings}
     try:
         # Standings are expensive to compute — cache for 60s
         await MatchCache.set_generic(cache_key, result, ttl=60)
     except Exception as _e:
-        pass  # logged below not to crash hot path
+        logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
     return result
 
 
@@ -343,9 +407,7 @@ async def remove_team_from_tournament(
     return await TournamentService.remove_team(session, tournament_id, team_id, user_id=user.id)
 
 
-# ═══════════════════════════════════════
 # Stage Management Endpoints
-# ═══════════════════════════════════════
 
 @router.post("/{tournament_id}/stages")
 async def setup_stages(
@@ -563,7 +625,7 @@ async def delete_stage(
     if not stage or stage.tournament_id != tournament_id:
         raise HTTPException(status_code=404, detail="Stage not found")
 
-    from sqlalchemy import delete, text
+    from sqlalchemy import text
     # Delete matches in this stage (cascades to deliveries, scorecards, etc.)
     await session.execute(text(
         "DELETE FROM matches WHERE stage_id = :sid AND tournament_id = :tid"

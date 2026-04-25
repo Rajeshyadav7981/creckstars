@@ -1,9 +1,16 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, func
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, UniqueConstraint, func
 from src.database.postgres.db import Base
 
 
 class DeliverySchema(Base):
     __tablename__ = "deliveries"
+    # Enforce one ball per (innings, sequence) at DB level. Belt-and-suspenders
+    # for the row-lock in ScoringService.record_delivery — if the lock ever
+    # fails to serialize (e.g. pgBouncer in transaction-pooling mode + bug),
+    # Postgres still refuses to persist a duplicate sequence number.
+    __table_args__ = (
+        UniqueConstraint("innings_id", "actual_ball_seq", name="ux_deliveries_innings_seq"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     innings_id = Column(Integer, ForeignKey("innings.id"), nullable=False)

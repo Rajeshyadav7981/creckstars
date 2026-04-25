@@ -4,10 +4,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
-from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
-from src.database.postgres.db import db, Base
+from src.database.postgres.db import db
 from starlette.middleware.gzip import GZipMiddleware
 from src.app.api.routers import main_router
 from src.app.api.config import CORS_ORIGINS, validate_config
@@ -49,6 +48,10 @@ CORS_HEADERS = {
     "access-control-allow-origin": CORS_ORIGINS,
     "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
     "access-control-allow-headers": "content-type, authorization, x-requested-with, accept, origin",
+    # Headers that browser clients must be able to read off responses. Native
+    # RN bypasses CORS but web builds / future clients do not; `X-Next-Cursor`
+    # drives keyset pagination and `X-Request-ID` is read for log correlation.
+    "access-control-expose-headers": "x-next-cursor, x-request-id",
     "access-control-max-age": "86400",
 }
 
@@ -132,25 +135,71 @@ async def lifespan(app: FastAPI):
         _startup_logger.error(f"Config FATAL: {e}")
         raise
     # Start Redis Pub/Sub subscriber for WebSocket multi-instance support
+    _ws_started = False
     try:
         from src.services.websocket_service import ws_manager
         await ws_manager.start_subscriber()
+        _ws_started = True
         _startup_logger.info("WS subscriber started")
     except Exception as e:
         _startup_logger.warning(f"WS subscriber failed (non-fatal): {e}")
     # Start notification worker (Observer on same Redis event bus)
+    _notif_started = False
     try:
         from src.services.notification_service import notification_worker
         await notification_worker.start()
+        _notif_started = True
         _startup_logger.info("Notifications worker started")
     except Exception as e:
         _startup_logger.warning(f"Notifications worker failed (non-fatal): {e}")
+
     yield
+
+    # ── Graceful shutdown ──
+    # Order matters: stop accepting new work, drain in-flight, then close sockets.
+    _startup_logger.info("Lifespan shutting down...")
     try:
-        await notification_worker.stop()
-    except Exception:
-        pass
-    await db.async_engine.dispose()
+        from src.utils.background_tasks import drain as _drain_bg
+        await _drain_bg(timeout=10.0)
+        _startup_logger.info("Background tasks drained")
+    except Exception as e:
+        _startup_logger.warning(f"Background task drain failed: {e}")
+    if _notif_started:
+        try:
+            from src.services.notification_service import notification_worker
+            await notification_worker.stop()
+            _startup_logger.info("Notifications worker stopped")
+        except Exception as e:
+            _startup_logger.warning(f"Notifications worker stop failed: {e}")
+    if _ws_started:
+        try:
+            from src.services.websocket_service import ws_manager
+            # Close every open WebSocket so clients reconnect to a healthy worker.
+            for match_id, conns in list(ws_manager.active_connections.items()):
+                for ws in list(conns):
+                    try:
+                        await ws.close(code=1012, reason="server restart")
+                    except Exception:
+                        pass
+                    ws_manager.disconnect(ws, match_id)
+            # Cancel the subscriber task so the Redis pubsub loop exits cleanly.
+            sub_task = getattr(ws_manager, "_subscriber_task", None)
+            if sub_task and not sub_task.done():
+                sub_task.cancel()
+            _startup_logger.info("WebSocket connections drained")
+        except Exception as e:
+            _startup_logger.warning(f"WS drain failed: {e}")
+    try:
+        from src.database.redis.redis_client import redis_client
+        await redis_client.close()
+        _startup_logger.info("Redis client closed")
+    except Exception as e:
+        _startup_logger.warning(f"Redis close failed: {e}")
+    try:
+        await db.async_engine.dispose()
+        _startup_logger.info("DB engine disposed")
+    except Exception as e:
+        _startup_logger.warning(f"DB dispose failed: {e}")
 
 
 try:
@@ -175,27 +224,38 @@ app.add_middleware(CORSMiddleware)
 # Request tracing — adds X-Request-ID to every request/response for log correlation
 app.add_middleware(RequestTracingMiddleware)
 
-# Rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
-# Global exception handler — logs traceback + returns error detail for debugging
+# Global exception handler — full trace logged server-side; clients never see internals
 import traceback as _tb
 from fastapi.responses import JSONResponse as _JSONResp
 from src.utils.logger import get_logger as _get_logger
+from src.app.api.config import ENVIRONMENT as _ENV
 _err_logger = _get_logger("unhandled")
+_IS_DEV = _ENV.lower() not in ("production", "prod")
 
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request, exc):
     tb_str = _tb.format_exc()
-    _err_logger.error(f"Unhandled {type(exc).__name__} on {request.method} {request.url.path}: {exc}\n{tb_str}")
-    return _JSONResp(
-        status_code=500,
-        content={
-            "detail": f"{type(exc).__name__}: {str(exc)}",
-            "path": str(request.url.path),
-        },
+    req_id = request.headers.get("x-request-id") or (
+        request.scope.get("headers", [])
     )
+    _err_logger.error(
+        "Unhandled exception",
+        extra={"extra_data": {
+            "exc_type": type(exc).__name__,
+            "method": request.method,
+            "path": str(request.url.path),
+            "traceback": tb_str,
+        }},
+    )
+    body = {"detail": "Internal server error"}
+    if _IS_DEV:
+        body["exc_type"] = type(exc).__name__
+        body["message"] = str(exc)
+        body["path"] = str(request.url.path)
+    return _JSONResp(status_code=500, content=body)
 
 app.include_router(main_router)
 
@@ -572,32 +632,15 @@ def api_root():
 
 _health_cache = {"data": None, "ts": 0}
 
+
 @app.get("/health")
 async def health():
-    """Health check for load balancers and monitoring.
-    Cached for 3s to avoid DB+Redis pings on every poll cycle."""
+    """Liveness check — cheap, always returns 200 if the process is up.
+    Use as the LB/monitor liveness probe; cached for 3s to keep it fast."""
     import time as _t
     now = _t.time()
     if _health_cache["data"] and now - _health_cache["ts"] < 3:
         return _health_cache["data"]
-
-    db_ok = False
-    redis_ok = False
-    try:
-        from sqlalchemy import text
-        async with db.AsyncSessionLocal() as session:
-            await session.execute(text("SELECT 1"))
-            db_ok = True
-    except Exception:
-        pass
-    try:
-        from src.database.redis.redis_client import redis_client
-        r = await redis_client.get_client()
-        if r:
-            await r.ping()
-            redis_ok = True
-    except Exception:
-        pass
 
     ws_stats = {}
     try:
@@ -609,8 +652,46 @@ async def health():
     except Exception:
         pass
 
-    health_status = "ok" if db_ok and redis_ok else "degraded"
-    result = {"status": health_status, "db": db_ok, "redis": redis_ok, "websocket": ws_stats}
+    result = {"status": "ok", "websocket": ws_stats}
     _health_cache["data"] = result
     _health_cache["ts"] = now
     return result
+
+
+@app.get("/readiness")
+async def readiness():
+    """Readiness probe — checks DB + Redis. Returns 503 on degraded state so
+    the load balancer can drain traffic from a failing instance. Never cached."""
+    from sqlalchemy import text
+    db_ok = False
+    redis_ok = False
+    db_error = None
+    redis_error = None
+    try:
+        async with db.AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+            db_ok = True
+    except Exception as e:
+        db_error = type(e).__name__
+    try:
+        from src.database.redis.redis_client import redis_client
+        r = await redis_client.get_client()
+        if r:
+            await r.ping()
+            redis_ok = True
+        else:
+            redis_error = "redis client unavailable"
+    except Exception as e:
+        redis_error = type(e).__name__
+
+    body = {"status": "ready" if (db_ok and redis_ok) else "not_ready",
+            "db": db_ok, "redis": redis_ok}
+    if db_error:
+        body["db_error"] = db_error
+    if redis_error:
+        body["redis_error"] = redis_error
+    return Response(
+        content=__import__("json").dumps(body),
+        status_code=200 if (db_ok and redis_ok) else 503,
+        media_type="application/json",
+    )

@@ -19,6 +19,9 @@ from src.app.api.routers.models.match_model import (
 )
 from src.app.api.rate_limiter import limiter
 from src.app.api.config import RATE_LIMITS
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/matches", tags=["Matches"])
 
@@ -36,7 +39,6 @@ async def create_match(
         match_type=req.match_type, time_slot=req.time_slot,
         stage_id=req.stage_id, group_id=req.group_id,
     )
-    # Invalidate creator's stats cache
     from src.app.api.routers.user_router import invalidate_user_stats
     await invalidate_user_stats(user.id)
     return {"id": m.id, "match_code": m.match_code, "status": m.status, "team_a_id": m.team_a_id, "team_b_id": m.team_b_id, "overs": m.overs}
@@ -83,7 +85,7 @@ async def list_matches(
         # Batch-load innings scores so list cards can show runs/wickets/overs.
         # One query for all matches instead of N per match.
         from src.database.postgres.schemas.innings_schema import InningsSchema
-        scores = {}  # {match_id: {team_id: {runs, wickets, overs}}}
+        scores = {}
         if match_ids:
             inn_res = await session.execute(
                 select(
@@ -96,7 +98,6 @@ async def list_matches(
                     "runs": row.total_runs, "wickets": row.total_wickets, "overs": row.total_overs,
                 }
 
-        # Batch-load venue names for matches that have a venue_id
         from src.database.postgres.schemas.venue_schema import VenueSchema
         venue_ids = {m.venue_id for m in matches if m.venue_id}
         venue_names = {}
@@ -176,7 +177,6 @@ async def get_match(
     team_a = teams.get(m.team_a_id)
     team_b = teams.get(m.team_b_id)
     tournament = await session.get(TournamentSchema, m.tournament_id) if m.tournament_id else None
-    # Load venue details
     venue = None
     if m.venue_id:
         from src.database.postgres.schemas.venue_schema import VenueSchema
@@ -244,6 +244,10 @@ async def update_match(
     if not updates:
         return {"id": m.id, "overs": m.overs, "match_date": str(m.match_date) if m.match_date else None, "time_slot": m.time_slot}
     updated = await MatchRepository.update(session, match_id, updates)
+    await session.commit()
+    # If the row wasn't in the identity map, update() returns None — re-read.
+    if updated is None:
+        updated = await MatchRepository.get_by_id(session, match_id)
     await MatchCache.invalidate_match(match_id)
     # Also invalidate the parent tournament's cached detail so the new value
     # is visible in the tournament screen immediately.
@@ -284,7 +288,6 @@ async def set_squad(
     await _invalidate_cache(f"squad:{match_id}:{req.team_id}")
 
     # Invalidate stats cache for all users whose players were added to the squad
-    # (their played matches/tournaments count may have changed)
     from src.app.api.routers.user_router import invalidate_user_stats
     player_ids = [p.player_id for p in req.players]
     if player_ids:
@@ -316,7 +319,7 @@ async def set_squad(
                     {"match_id": match_id, "type": "squad_set"},
                 )
         except Exception as _e:
-            pass  # logged below not to crash hot path
+            logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
     asyncio.create_task(_notify_squad())
 
     return {"message": "Squad set successfully"}
@@ -349,7 +352,6 @@ async def start_innings(
     innings = await MatchService.start_innings(
         session, match_id, req.batting_team_id, req.striker_id, req.non_striker_id, req.bowler_id, user_id=user.id,
     )
-    # Invalidate cached live-state so the new innings is returned immediately
     await MatchCache.invalidate_match(match_id)
     return {
         "innings_id": innings.id, "innings_number": innings.innings_number,

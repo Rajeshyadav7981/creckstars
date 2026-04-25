@@ -14,10 +14,8 @@ def _env_int(key: str, default: int = 0) -> int:
     return int(os.getenv(key, str(default)))
 
 
-# ── Environment ──
 ENVIRONMENT = _env("ENVIRONMENT", "development")
 
-# ── Database ──
 DB_HOST = _env("DB_HOST")
 DB_PORT = _env("DB_PORT")
 DB_USER = _env("DB_USER")
@@ -26,31 +24,34 @@ DB_NAME = _env("DB_NAME")
 DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 ASYNC_DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-# ── Redis ──
 REDIS_URL = _env("REDIS_URL")
 
-# ── JWT / Auth ──
 SECRET_KEY = _env("SECRET_KEY")
 ALGORITHM = _env("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = _env_int("ACCESS_TOKEN_EXPIRE_MINUTES", 15)
 REFRESH_TOKEN_EXPIRE_MINUTES = _env_int("REFRESH_TOKEN_EXPIRE_MINUTES", 10080)
 
-# ── OTP ──
 OTP_EXPIRE_MINUTES = _env_int("OTP_EXPIRE_MINUTES", 5)
+OTP_MAX_ATTEMPTS = _env_int("OTP_MAX_ATTEMPTS", 5)        # lockout after N wrong guesses
+OTP_LOCKOUT_MINUTES = _env_int("OTP_LOCKOUT_MINUTES", 15)
 SMS_API_KEY = _env("SMS_API_KEY")
 SMS_TEMPLATE_ID = _env("SMS_TEMPLATE_ID")
 
-# ── CORS ──
+# Temporary dev-mode switch: while DLT approval for SMS OTP is pending, accept
+# any 6-digit numeric code as valid. Defaults ON for non-production so the
+# login/register/reset flows work end-to-end without real SMS delivery. Set
+# OTP_BYPASS_ENABLED=false in production env once real OTP delivery is live.
+_otp_bypass_default = "false" if ENVIRONMENT.lower() in ("production", "prod") else "true"
+OTP_BYPASS_ENABLED = _env("OTP_BYPASS_ENABLED", _otp_bypass_default).lower() in ("1", "true", "yes", "on")
+
 CORS_ORIGINS = _env("CORS_ORIGINS", "*")
 
-# ── Deep Linking / Share ──
 APP_SCHEME = _env("APP_SCHEME", "creckstars")
 APP_PACKAGE_NAME = _env("APP_PACKAGE_NAME")
 APP_DOWNLOAD_URL = _env("APP_DOWNLOAD_URL")
 SHARE_BASE_URL = _env("SHARE_BASE_URL")
 APP_SHA256_FINGERPRINT = _env("APP_SHA256_FINGERPRINT")
 
-# ── App Version / APK Hosting ──
 # Version info is read from backend/releases/version.json at runtime (no restart needed).
 # If version.json doesn't exist, these env vars are used as fallback.
 APK_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "releases")
@@ -62,8 +63,7 @@ APP_RELEASE_NOTES = _env("APP_RELEASE_NOTES", "Bug fixes and performance improve
 
 
 def get_app_version_info() -> dict:
-    """Read version info from releases/version.json (live — no restart needed).
-    Falls back to env vars if file doesn't exist."""
+    """Read version info from releases/version.json (live — no restart needed)."""
     import json
     try:
         with open(_VERSION_JSON, "r") as f:
@@ -83,14 +83,22 @@ def get_app_version_info() -> dict:
         }
 
 
-# ── Rate Limiting ──
-# All values in "requests/period" format. Change in .env to tune limits.
+# All rate limits are "requests/period". Change in .env to tune.
 RATE_LIMIT_DEFAULT = _env("RATE_LIMIT_DEFAULT", "200/minute")
 RATE_LIMITS = {
     "register":             _env("RATE_LIMIT_REGISTER", "5/minute"),
     "login":                _env("RATE_LIMIT_LOGIN", "10/minute"),
+    "send_otp":             _env("RATE_LIMIT_SEND_OTP", "3/minute"),
+    "verify_otp":           _env("RATE_LIMIT_VERIFY_OTP", "5/minute"),
+    "reset_password":       _env("RATE_LIMIT_RESET_PASSWORD", "5/minute"),
+    "refresh":              _env("RATE_LIMIT_REFRESH", "60/minute"),
+    "lookup_mobile":        _env("RATE_LIMIT_LOOKUP_MOBILE", "30/minute"),
     "score_delivery":       _env("RATE_LIMIT_SCORE", "120/minute"),
     "undo":                 _env("RATE_LIMIT_UNDO", "30/minute"),
+    "end_over":             _env("RATE_LIMIT_END_OVER", "30/minute"),
+    "end_innings":          _env("RATE_LIMIT_END_INNINGS", "10/minute"),
+    "end_match":            _env("RATE_LIMIT_END_MATCH", "10/minute"),
+    "revert":               _env("RATE_LIMIT_REVERT", "10/minute"),
     "broadcast":            _env("RATE_LIMIT_BROADCAST", "20/minute"),
     "create_post":          _env("RATE_LIMIT_CREATE_POST", "30/minute"),
     "list_posts":           _env("RATE_LIMIT_LIST_POSTS", "60/minute"),
@@ -105,9 +113,8 @@ RATE_LIMITS = {
 }
 
 
-# ── Validation ──
 def validate_config():
-    """Validate configuration and print warnings for insecure/dev settings."""
+    """Validate configuration and warn on insecure/dev settings."""
     import warnings
 
     is_production = ENVIRONMENT.lower() in ("production", "prod")
@@ -143,29 +150,33 @@ def validate_config():
             stacklevel=2,
         )
 
+    if OTP_BYPASS_ENABLED:
+        msg = "[CONFIG] OTP_BYPASS_ENABLED — any 6-digit OTP will be accepted. Flip OTP_BYPASS_ENABLED=false once DLT SMS delivery is live."
+        if is_production:
+            raise RuntimeError(msg.replace("[CONFIG]", "[CONFIG] FATAL:"))
+        warnings.warn(msg, stacklevel=2)
 
-# ── Cache TTLs (seconds) — centralized so tuning is easy ──
-CACHE_TTL_USER_PROFILE = 300     # /users/@username
-CACHE_TTL_USER_SEARCH = 60      # /users/search
-CACHE_TTL_MENTION_SEARCH = 30   # /users/mention-search
-CACHE_TTL_FOLLOWERS = 120       # followers/following lists
-CACHE_TTL_STANDINGS = 60        # tournament standings
-CACHE_TTL_PLAYER_STATS = 30     # player career stats
-CACHE_TTL_USER_STATS = 60       # /me/stats
-CACHE_TTL_LIVE_STATE = 5        # live match state (hot path)
-CACHE_TTL_LIVE_STATE_DONE = 300  # completed match state
-CACHE_TTL_SCORECARD = 60        # live match scorecard
-CACHE_TTL_SCORECARD_DONE = 600  # completed match scorecard
-CACHE_TTL_COMMENTARY = 30       # commentary
 
-# ── Upload Limits ──
-MAX_PROFILE_PHOTO_SIZE = 5 * 1024 * 1024    # 5 MB
-MAX_POST_IMAGE_SIZE = 10 * 1024 * 1024      # 10 MB
+# Cache TTLs (seconds) — centralised so tuning is easy
+CACHE_TTL_USER_PROFILE = 300
+CACHE_TTL_USER_SEARCH = 60
+CACHE_TTL_MENTION_SEARCH = 30
+CACHE_TTL_FOLLOWERS = 120
+CACHE_TTL_STANDINGS = 60
+CACHE_TTL_PLAYER_STATS = 30
+CACHE_TTL_USER_STATS = 60
+CACHE_TTL_LIVE_STATE = 5        # hot path
+CACHE_TTL_LIVE_STATE_DONE = 300
+CACHE_TTL_SCORECARD = 60
+CACHE_TTL_SCORECARD_DONE = 600
+CACHE_TTL_COMMENTARY = 30
+
+MAX_PROFILE_PHOTO_SIZE = 5 * 1024 * 1024
+MAX_POST_IMAGE_SIZE = 10 * 1024 * 1024
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 PROFILE_PHOTO_MAX_WIDTH = 512
 POST_IMAGE_MAX_WIDTH = 1024
 
-# ── Pagination Defaults ──
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 100
 MAX_COMMENT_DEPTH = 20

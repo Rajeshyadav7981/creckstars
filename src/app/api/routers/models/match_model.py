@@ -8,7 +8,7 @@ class CreateMatchRequest(BaseModel):
     team_b_id: int = Field(..., gt=0)
     venue_id: int | None = None
     match_date: date | None = None
-    overs: int = Field(20, gt=0, le=120)  # up to a full Test day (~90 ov) + buffer
+    overs: int = Field(20, gt=0, le=120)
     match_type: str | None = Field("group", max_length=20)
     time_slot: str | None = Field(None, max_length=50)
     stage_id: int | None = None

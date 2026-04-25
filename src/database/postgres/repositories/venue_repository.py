@@ -1,4 +1,3 @@
-import math
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.schemas.venue_schema import VenueSchema

@@ -1,7 +1,7 @@
 import random
 import string
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 from sqlalchemy import select, delete as sa_delete, insert as sa_insert, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only

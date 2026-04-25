@@ -1,10 +1,8 @@
 import logging
 import json
-import time
 import contextvars
 from datetime import datetime, timezone
 
-# Context variable for request tracing
 request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="")
 
 

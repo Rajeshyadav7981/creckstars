@@ -1,16 +1,4 @@
-"""
-Notification Service — Expo Push Notifications via Observer pattern.
-
-Architecture:
-  Scoring Event → Redis Pub/Sub (event bus) → NotificationWorker (observer) → Expo Push API
-
-Design:
-  - Listens to match:*:live Redis channels (same as WebSocket)
-  - Only sends push for significant events (wickets, match start/end, milestones)
-  - Fire-and-forget: never blocks scoring flow
-  - Batches: sends up to 100 tokens per Expo API call
-  - Fire-and-forget: never blocks the scoring flow
-"""
+"""Notification Service — Expo Push Notifications via Observer pattern."""
 import json
 import asyncio
 import httpx
@@ -74,15 +62,9 @@ class NotificationService:
 
     @staticmethod
     async def get_all_match_tokens(match_id: int) -> list:
-        """Get push tokens for ALL users who should be notified about this match:
-        1. Explicitly subscribed users (via match_subscriptions)
-        2. Match creator
-        3. Players in the match squads (their linked user accounts)
-
-        Deduplicates tokens so no one gets double notifications.
-        Uses Redis cache (60s TTL) to avoid DB query on every scoring event.
-        """
-        # Try cache first
+        """Get push tokens for ALL users who should be notified about this match."""
+        # Uses Redis cache (60s TTL) to avoid DB query on every scoring event.
+        # Deduplicates tokens across 3 sources: explicit subscribers, match creator, squad players.
         cache_key = f"push_tokens:{match_id}"
         try:
             r = await redis_client.get_client()
@@ -96,7 +78,6 @@ class NotificationService:
         tokens = set()
         try:
             async with db.AsyncSessionLocal() as session:
-                # Single query to fetch all relevant tokens (union of 3 sources)
                 result = await session.execute(text("""
                     SELECT DISTINCT pt.expo_push_token FROM push_tokens pt WHERE pt.user_id IN (
                         SELECT ms.user_id FROM match_subscriptions ms WHERE ms.match_id = :mid
@@ -128,24 +109,20 @@ class NotificationService:
 
     @staticmethod
     async def auto_subscribe_match_participants(match_id: int):
-        """Auto-subscribe match creator and squad players when match starts.
-        Called once when innings starts."""
+        """Auto-subscribe match creator and squad players when match starts."""
         try:
             async with db.AsyncSessionLocal() as session:
-                # Get creator user_id
                 result = await session.execute(text(
                     "SELECT created_by FROM matches WHERE id = :mid"
                 ), {"mid": match_id})
                 row = result.first()
                 if row:
                     creator_id = row[0]
-                    # Upsert subscription for creator
                     await session.execute(text(
                         "INSERT INTO match_subscriptions (user_id, match_id) "
                         "VALUES (:uid, :mid) ON CONFLICT (user_id, match_id) DO NOTHING"
                     ), {"uid": creator_id, "mid": match_id})
 
-                # Get squad players who have user accounts
                 result = await session.execute(text(
                     "SELECT DISTINCT p.user_id FROM match_squads ms "
                     "JOIN players p ON p.id = ms.player_id "
@@ -186,7 +163,6 @@ class NotificationService:
             if data.get("is_wicket"):
                 score = f"{data.get('innings_runs', '?')}/{data.get('innings_wickets', '?')}"
                 return ("WICKET!", f"Score: {score} ({data.get('innings_overs', '')} ov)")
-            # Check milestone (runs)
             return (None, None)
 
         elif event_type == "over_end":
@@ -203,8 +179,7 @@ class NotificationService:
 
 
 class NotificationWorker:
-    """Background worker — subscribes to Redis Pub/Sub and dispatches push notifications.
-    Uses Observer pattern: observes the same event bus as WebSocket."""
+    """Background worker — subscribes to Redis Pub/Sub and dispatches push notifications."""
 
     def __init__(self):
         self._task = None

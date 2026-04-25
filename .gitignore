@@ -11,28 +11,8 @@ venv/
 .venv/
 env/
 
-# Environment (secrets — use .env.example as template)
+# Environment secrets
 .env
-
-# Test cache
-.pytest_cache/
-.coverage
-htmlcov/
 
 # Uploads (runtime user data, not code)
 uploads/
-
-# Releases (APK files — too large for git)
-
-# Dev/test scripts (not production code)
-seed_data.py
-seed_matches.py
-create_double_super_over.py
-test_*.py
-!tests/
-
-# Keep schema.sql, ignore other SQL scripts
-seed_*.sql
-
-# Dev notes
-MATCH_REPORT.md

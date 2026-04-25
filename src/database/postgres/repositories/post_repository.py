@@ -123,7 +123,6 @@ class PostRepository:
         like = existing.scalar_one_or_none()
         if like:
             await session.delete(like)
-            # Decrement count
             post = await session.get(PostSchema, post_id)
             if post:
                 post.likes_count = max(0, post.likes_count - 1)
@@ -286,7 +285,6 @@ class PollRepository:
                 await session.commit()
                 return "changed"
 
-        # New vote
         session.add(PollVoteSchema(poll_id=poll_id, option_id=option_id, user_id=user_id))
         option = await session.get(PollOptionSchema, option_id)
         if option:

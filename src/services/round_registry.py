@@ -89,12 +89,8 @@ def is_knockout(name: str) -> bool:
     return bool(r and r.kind == "knockout")
 
 
-# ---------------------------------------------------------------------------
-# Pair strategies
-#
-# A strategy takes a list of team ids (already in seed order) and returns
-# a list of (team_a_id, team_b_id) pairs to create as matches.
-# ---------------------------------------------------------------------------
+# A pair strategy takes a list of team ids (already in seed order) and
+# returns a list of (team_a_id, team_b_id) pairs to create as matches.
 
 def _round_robin(team_ids: List[int]) -> List[tuple]:
     """Every pair plays once (Circle Method via combinations)."""

@@ -11,7 +11,6 @@ class OTPRepository:
         otp = OTPSchema(**data)
         session.add(otp)
         await session.commit()
-        await session.refresh(otp)
         return otp
 
     @staticmethod
@@ -41,4 +40,15 @@ class OTPRepository:
         otp = result.scalar_one_or_none()
         if otp:
             otp.is_verified = True
+            await session.commit()
+
+    @staticmethod
+    async def delete_otp(session: AsyncSession, otp_id: int):
+        """Remove an OTP row — used to prevent retry after a wrong-code guess."""
+        result = await session.execute(
+            select(OTPSchema).where(OTPSchema.id == otp_id)
+        )
+        otp = result.scalar_one_or_none()
+        if otp:
+            await session.delete(otp)
             await session.commit()

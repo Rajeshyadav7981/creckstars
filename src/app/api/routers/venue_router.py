@@ -34,8 +34,7 @@ async def search_location(
     user=Depends(get_current_user_optional),
 ):
     """Search locations using OpenStreetMap Nominatim (free, no API key)."""
-    results = await VenueService.search_location(q)
-    return results
+    return await VenueService.search_location(q)
 
 
 @router.get("/nearby")
@@ -61,8 +60,8 @@ async def nearby_venues(
 
 @router.get("")
 async def list_venues(
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=10000),
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ):

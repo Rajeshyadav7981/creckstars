@@ -1,4 +1,3 @@
-import json
 import redis.asyncio as redis
 from src.app.api.config import REDIS_URL
 

@@ -16,17 +16,37 @@ class PlayerService:
         role: str = None, profile_image: str = None, linked_user_id: int = None,
         date_of_birth=None, bio: str = None, city: str = None,
         state_province: str = None, country: str = None,
+        is_guest: bool = False,
     ):
-        full_name = f"{first_name} {last_name}" if last_name else first_name
         data = {
-            "first_name": first_name, "last_name": last_name, "full_name": full_name,
-            "mobile": mobile, "date_of_birth": date_of_birth,
+            "first_name": first_name, "last_name": last_name,
+            "full_name": f"{first_name} {last_name}" if last_name else first_name,
+            "mobile": mobile if not is_guest else None,
+            "is_guest": bool(is_guest),
+            "date_of_birth": date_of_birth,
             "bio": bio, "city": city, "state_province": state_province, "country": country,
             "batting_style": batting_style, "bowling_style": bowling_style,
             "role": role, "profile_image": profile_image, "created_by": user_id,
         }
+        # Auto-link rules:
+        #   1. Explicit linked_user_id always wins.
+        #   2. Guest players never auto-link (by definition).
+        #   3. Otherwise, if a user exists with this mobile, attach their
+        #      identity (user_id + name from user row + profile photo).
         if linked_user_id:
             data["user_id"] = linked_user_id
+        elif not is_guest and mobile:
+            existing_user = await UserRepository.get_by_mobile(session, mobile)
+            if existing_user:
+                data["user_id"] = existing_user.id
+                # User's self-declared identity overrides admin-typed name.
+                # Consistent with the link-on-register path in AuthService.
+                data["first_name"] = existing_user.first_name or data["first_name"]
+                data["last_name"] = existing_user.last_name or data["last_name"]
+                data["full_name"] = existing_user.full_name or data["full_name"]
+                # Only pick up user's photo if the admin didn't supply one.
+                if not profile_image and getattr(existing_user, "profile", None):
+                    data["profile_image"] = existing_user.profile
         return await PlayerRepository.create(session, data)
 
     @staticmethod
@@ -68,10 +88,6 @@ class PlayerService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Player not found")
         return player
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Full career stats — heavy query, Redis-cached, viewer-specific follow
-    # ─────────────────────────────────────────────────────────────────────
-
     @staticmethod
     async def get_full_stats(session: AsyncSession, player_id: int, viewer_id: int | None = None) -> dict:
         """Full player profile including career stats, recent form, teams, and
@@ -82,12 +98,13 @@ class PlayerService:
         cache_key = f"player_stats:{player_id}"
         cached = await MatchCache.get_generic(cache_key)
         if cached:
-            return PlayerService._attach_viewer_flags(session, cached, viewer_id)
+            # _attach_viewer_flags is async — without await the handler would
+            # return a coroutine and FastAPI blows up trying to serialise it.
+            return await PlayerService._attach_viewer_flags(session, cached, viewer_id)
 
         body, linked_user_id, follow_from_cte = await PlayerService._compute_stats_body(
             session, player_id, viewer_id
         )
-        # Cache the shared body (no viewer-specific flags)
         await MatchCache.set_generic(cache_key, body, ttl=30)
         # Attach viewer flags from the same CTE call (no extra query)
         result = dict(body)
@@ -120,7 +137,6 @@ class PlayerService:
     @staticmethod
     async def _compute_stats_body(session: AsyncSession, player_id: int, viewer_id: int | None):
         """Compute the heavy shared-body of player stats. Returns (body, linked_user_id, is_following)."""
-        # ── Query 1: player + user + batting/bowling aggregates + best + matches + follow
         combined = await session.execute(
             text(_SQL_PLAYER_CORE),
             {"pid": player_id, "viewer_id": viewer_id or 0},
@@ -140,7 +156,6 @@ class PlayerService:
         batting = _build_batting(batj)
         bowling = _build_bowling(bowlj, bestj)
 
-        # ── Query 2: teams the player has been on
         teams_result = await session.execute(
             select(TeamSchema.id, TeamSchema.name, TeamSchema.short_name, TeamSchema.color)
             .join(MatchSquadSchema, MatchSquadSchema.team_id == TeamSchema.id)
@@ -150,11 +165,9 @@ class PlayerService:
         teams = [{"id": t.id, "name": t.name, "short_name": t.short_name, "color": t.color}
                  for t in teams_result.all()]
 
-        # ── Queries 3 & 4: recent batting + bowling with inline opponent JOIN
         recent_innings = await _fetch_recent_batting(session, player_id)
         recent_bowling = await _fetch_recent_bowling(session, player_id)
 
-        # ── Query 5: format-wise stats (batting + bowling merged)
         format_stats = await _fetch_format_stats(session, player_id)
 
         body = {
@@ -169,8 +182,6 @@ class PlayerService:
         }
         return body, uj.get("u_id"), is_following_flag
 
-
-# ── Pure helper functions (no DB access) ────────────────────────────────────
 
 def _build_batting(batj: dict) -> dict:
     innings = batj.get("innings") or 0
@@ -307,8 +318,6 @@ async def _fetch_format_stats(session: AsyncSession, player_id: int) -> dict:
     return out
 
 
-# ── SQL constants (module-level — compiled once) ────────────────────────────
-
 _SQL_PLAYER_CORE = """
     WITH
     p AS (
@@ -339,7 +348,12 @@ _SQL_PLAYER_CORE = """
             COALESCE(SUM(CASE WHEN runs >= 100 THEN 1 ELSE 0 END), 0) AS hundreds
         FROM batting_scorecards WHERE player_id = :pid
     ),
-    bowl AS (
+    -- Single scan over the player's bowling rows: aggregate totals + pick the
+    -- 'best' spell in one pass using conditional aggregates + MIN-by-tuple.
+    -- Previously this was two CTEs hitting bowling_scorecards twice — the
+    -- covering index on player_id made each scan cheap, but at millions of
+    -- rows halving the reads is still worthwhile.
+    bowl_raw AS (
         SELECT
             COUNT(*) AS innings,
             COALESCE(SUM(overs_bowled), 0) AS overs,
@@ -348,15 +362,21 @@ _SQL_PLAYER_CORE = """
             COALESCE(SUM(wickets), 0) AS wickets,
             COALESCE(SUM(wides), 0) AS wides,
             COALESCE(SUM(no_balls), 0) AS no_balls,
-            COALESCE(SUM(dot_balls), 0) AS dots
+            COALESCE(SUM(dot_balls), 0) AS dots,
+            -- ARRAY_AGG with ORDER BY + FILTER picks the best spell in the
+            -- same pass as the aggregates. [1] is the top-sorted element.
+            (ARRAY_AGG(wickets ORDER BY wickets DESC, runs_conceded ASC)
+                FILTER (WHERE wickets > 0))[1] AS best_w,
+            (ARRAY_AGG(runs_conceded ORDER BY wickets DESC, runs_conceded ASC)
+                FILTER (WHERE wickets > 0))[1] AS best_r
         FROM bowling_scorecards WHERE player_id = :pid
     ),
+    bowl AS (
+        SELECT innings, overs, maidens, runs, wickets, wides, no_balls, dots
+        FROM bowl_raw
+    ),
     best AS (
-        SELECT wickets AS best_w, runs_conceded AS best_r
-        FROM bowling_scorecards
-        WHERE player_id = :pid AND wickets > 0
-        ORDER BY wickets DESC, runs_conceded ASC
-        LIMIT 1
+        SELECT best_w, best_r FROM bowl_raw WHERE best_w IS NOT NULL
     ),
     mc AS (
         SELECT COUNT(DISTINCT match_id) AS matches

@@ -1,22 +1,48 @@
 from fastapi import HTTPException, status
+from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.repositories.match_event_repository import MatchEventRepository
 from src.database.postgres.repositories.delivery_repository import DeliveryRepository
 from src.database.postgres.repositories.innings_repository import InningsRepository
 from src.database.postgres.repositories.match_repository import MatchRepository
 from src.database.postgres.repositories.scorecard_repository import ScorecardRepository
+from src.database.postgres.schemas.match_schema import MatchSchema
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class UndoService:
 
     @staticmethod
     async def undo_last_ball(session: AsyncSession, match_id: int, user_id: int):
-        match = await MatchRepository.get_by_id(session, match_id)
+        try:
+            return await UndoService._undo_last_ball_inner(session, match_id, user_id)
+        except HTTPException:
+            # Client-visible validation errors — don't log as 500, just bubble up.
+            await session.rollback()
+            raise
+        except Exception as e:
+            # Any unexpected failure → roll back the whole multi-step revert so
+            # we never leave the DB in a half-undone state.
+            await session.rollback()
+            logger.error(f"Undo failed for match {match_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Undo failed — match state unchanged.",
+            )
+
+    @staticmethod
+    async def _undo_last_ball_inner(session: AsyncSession, match_id: int, user_id: int):
+        # Lock the match row first so undo can't interleave with record_delivery.
+        match_res = await session.execute(
+            select(MatchSchema).where(MatchSchema.id == match_id).with_for_update()
+        )
+        match = match_res.scalar_one_or_none()
         if not match or match.status not in ("live", "completed"):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not in progress")
 
         # Get last delivery event (skip undo, end_over, innings_end events)
-        from sqlalchemy import select, desc
         from src.database.postgres.schemas.match_event_schema import MatchEventSchema
         result = await session.execute(
             select(MatchEventSchema)

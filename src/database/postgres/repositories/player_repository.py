@@ -1,4 +1,4 @@
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.schemas.player_schema import PlayerSchema
 
@@ -43,6 +43,40 @@ class PlayerRepository:
     async def get_by_user_id(session: AsyncSession, user_id: int) -> PlayerSchema | None:
         result = await session.execute(select(PlayerSchema).where(PlayerSchema.user_id == user_id))
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_stubs_by_mobile(session: AsyncSession, mobile: str) -> list[PlayerSchema]:
+        """Find unlinked (user_id IS NULL) player stubs with the given mobile."""
+        result = await session.execute(
+            select(PlayerSchema).where(
+                PlayerSchema.mobile == mobile,
+                PlayerSchema.user_id.is_(None),
+            )
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def link_stubs_to_user(
+        session: AsyncSession,
+        mobile: str,
+        user_id: int,
+        sync_fields: dict | None = None,
+    ) -> int:
+        """Attach user_id to every stub player with this mobile; sync_fields normalises identity columns to the user's registered values. Returns rows updated; caller commits."""
+        values = {"user_id": user_id}
+        if sync_fields:
+            for k, v in sync_fields.items():
+                if v:
+                    values[k] = v
+        res = await session.execute(
+            sql_update(PlayerSchema)
+            .where(
+                PlayerSchema.mobile == mobile,
+                PlayerSchema.user_id.is_(None),
+            )
+            .values(**values)
+        )
+        return int(res.rowcount or 0)
 
     @staticmethod
     async def update(session: AsyncSession, player_id: int, data: dict) -> PlayerSchema | None:

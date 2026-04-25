@@ -57,7 +57,6 @@ class AuthService:
         player_role: str | None = None,
     ) -> dict:
         """Register user. OTP must be verified before calling this."""
-        # Check duplicates
         if email and await UserRepository.get_by_email(session, email):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -69,7 +68,6 @@ class AuthService:
                 detail="Mobile number already registered",
             )
 
-        # Validate and check username
         if username:
             username = username.lower().strip()
             from src.utils.text_parser import validate_username
@@ -82,7 +80,6 @@ class AuthService:
             if existing.scalar_one_or_none():
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already taken")
         else:
-            # Auto-generate from name
             from src.utils.text_parser import generate_username
             import random
             username = generate_username(first_name, random.randint(1000, 9999))
@@ -105,6 +102,59 @@ class AuthService:
             "bowling_style": bowling_style,
             "player_role": player_role,
         })
+
+        # Auto-link any stub player rows with the same mobile AND normalise
+        # their name fields to the registering user's declared name. Rule:
+        # the person themselves knows their name better than whoever typed
+        # the stub — so admin-typed aliases / typos get replaced. Admin can
+        # still edit the player afterwards if they want a different display
+        # name (e.g. a nickname).
+        try:
+            from src.database.postgres.repositories.player_repository import PlayerRepository
+            sync_fields = {
+                "first_name": first_name,
+                "last_name": last_name,
+                "full_name": f"{first_name} {last_name}" if last_name else first_name,
+            }
+            linked = await PlayerRepository.link_stubs_to_user(
+                session, mobile, user.id, sync_fields=sync_fields,
+            )
+            if linked:
+                logger.info(
+                    "Linked stub players on registration",
+                    extra={"extra_data": {"user_id": user.id, "linked_count": linked}},
+                )
+            # If no stub was adopted, mint a fresh player row for this user so
+            # the PlayerProfile screen (stats + recent form) is always reachable
+            # — users who haven't been added to any team yet would otherwise
+            # land on the thin UserPublicProfile which only shows follow counts.
+            await session.commit()
+            existing_player = await PlayerRepository.get_by_user_id(session, user.id)
+            if existing_player is None:
+                await PlayerRepository.create(session, {
+                    "user_id": user.id,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "full_name": f"{first_name} {last_name}" if last_name else first_name,
+                    "mobile": mobile,
+                    "profile_image": profile,
+                    "bio": bio,
+                    "city": city,
+                    "state_province": state_province,
+                    "country": country,
+                    "date_of_birth": date_of_birth,
+                    "batting_style": batting_style,
+                    "bowling_style": bowling_style,
+                    "role": player_role,
+                    "created_by": user.id,
+                })
+                logger.info(
+                    "Auto-created player for new user",
+                    extra={"extra_data": {"user_id": user.id}},
+                )
+        except Exception as e:
+            # Never block registration on a best-effort link sweep.
+            logger.warning(f"Stub-player link failed for user {user.id}: {e}")
 
         token = create_access_token(
             data={"sub": str(user.id)},
@@ -134,13 +184,11 @@ class AuthService:
             update_data["email"] = data["email"]
         if "profile" in data:
             update_data["profile"] = data["profile"] or None
-        # Cricket profile fields
         for field in ("bio", "city", "state_province", "country", "date_of_birth",
                       "batting_style", "bowling_style", "player_role"):
             if field in data:
                 update_data[field] = data[field] or None
 
-        # Rebuild full_name if name changed
         if "first_name" in update_data or "last_name" in update_data:
             current_user = await UserRepository.get_by_id(session, user_id)
             fn = update_data.get("first_name", current_user.first_name)
@@ -153,7 +201,6 @@ class AuthService:
                 detail="No fields to update",
             )
 
-        # Check email uniqueness if changing email
         if "email" in update_data and update_data["email"]:
             existing = await UserRepository.get_by_email(session, update_data["email"])
             if existing and existing.id != user_id:
@@ -178,26 +225,13 @@ class AuthService:
                 if user.username:
                     await r.delete(f"profile:{user.username.lower()}")
         except Exception as _e:
-            pass  # logged below not to crash hot path
+            pass  # non-fatal; stale cache will expire on its own TTL
 
-        return {
-            "id": user.id,
-            "username": getattr(user, 'username', None),
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "full_name": user.full_name,
-            "mobile": user.mobile,
-            "email": user.email,
-            "profile": user.profile,
-            "bio": getattr(user, 'bio', None),
-            "city": getattr(user, 'city', None),
-            "state_province": getattr(user, 'state_province', None),
-            "country": getattr(user, 'country', None),
-            "date_of_birth": str(user.date_of_birth) if getattr(user, 'date_of_birth', None) else None,
-            "batting_style": getattr(user, 'batting_style', None),
-            "bowling_style": getattr(user, 'bowling_style', None),
-            "player_role": getattr(user, 'player_role', None),
-        }
+        # Return the ORM row and let response_model=UserResponse serialize it.
+        # A hand-built dict here used to silently drop followers_count /
+        # following_count / date_of_birth etc, so the client's AuthContext
+        # lost those fields on every edit.
+        return user
 
     @staticmethod
     async def login(

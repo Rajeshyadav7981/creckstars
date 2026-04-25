@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Date, ForeignKey, Text, func
+from sqlalchemy import Column, Integer, String, DateTime, Date, ForeignKey, Text, Boolean, func
 from src.database.postgres.db import Base
 
 
@@ -11,6 +11,9 @@ class PlayerSchema(Base):
     last_name = Column(String(100), nullable=True)
     full_name = Column(String(200), nullable=False)
     mobile = Column(String(15), nullable=True)
+    # Deliberate unlinkable stub (kid / walk-in / no phone). Never auto-links
+    # to a user. Default FALSE for backward compatibility with existing rows.
+    is_guest = Column(Boolean, nullable=False, server_default="false", default=False)
     date_of_birth = Column(Date, nullable=True)
     bio = Column(Text, nullable=True)
     city = Column(String(100), nullable=True)

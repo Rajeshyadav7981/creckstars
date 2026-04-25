@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,8 +9,6 @@ from src.utils.text_parser import extract_mentions, extract_hashtags
 
 
 class CommunityService:
-
-    # ── Posts ──
 
     @staticmethod
     async def create_post(session: AsyncSession, user_id: int, text: str, title: str = None, tag: str = None, image_url: str = None):
@@ -79,7 +76,6 @@ class CommunityService:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()
             if r:
-                # Delete post list caches for all sorts (targeted, not keys scan)
                 for sort in ("hot", "new", "top"):
                     sort_keys = await r.keys(f"cache:posts:{sort}:*")
                     if sort_keys:
@@ -106,7 +102,6 @@ class CommunityService:
         else:
             rows = await PostRepository.list_posts(session, limit=limit, offset=offset, sort=sort, cursor=cursor)
 
-            # Redis pipeline for latest like counts
             redis_likes = {}
             post_ids = [row[0].id for row in rows]
             try:
@@ -202,7 +197,6 @@ class CommunityService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Text required")
         comment.text = text.strip()
         await session.commit()
-        # Invalidate cache
         try:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()
@@ -224,12 +218,10 @@ class CommunityService:
         if comment.user_id != user_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your comment")
         await PostRepository.delete_comment(session, comment_id)
-        # Decrement post comment count
         post = await PostRepository.get_post(session, post_id)
         if post and post.comments_count > 0:
             post.comments_count -= 1
             await session.commit()
-        # Invalidate cache
         try:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()
@@ -251,7 +243,6 @@ class CommunityService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Comment text is required")
         comment = await PostRepository.add_comment(session, post_id, user_id, text.strip(), parent_id=parent_id)
 
-        # Populate closure table
         closure_self = CommentClosureSchema(ancestor_id=comment.id, descendant_id=comment.id, depth=0)
         session.add(closure_self)
 
@@ -289,7 +280,6 @@ class CommunityService:
     @staticmethod
     async def get_comments(session: AsyncSession, post_id: int, limit: int = 20, offset: int = 0,
                            max_depth: int = 2, parent_id: int = None, user_id: int = None):
-        # Build cache key including all parameters
         cache_key = f"comments:{post_id}:d{max_depth}:p{parent_id}:l{limit}:o{offset}"
         try:
             cached = await MatchCache.get_generic(cache_key)
@@ -299,7 +289,6 @@ class CommunityService:
             pass  # logged below not to crash hot path
 
         if parent_id:
-            # Use closure table to fetch subtree under parent_id
             rows = await PostRepository.get_comments_subtree(session, post_id, parent_id, max_depth=max_depth, limit=limit, offset=offset)
         else:
             rows = await PostRepository.get_comments(session, post_id, limit=limit, offset=offset)
@@ -339,11 +328,9 @@ class CommunityService:
             else:
                 top_level.append(comment)
 
-        # Apply depth limiting: trim tree beyond max_depth and annotate
         def _limit_depth(nodes, current_depth):
             for node in nodes:
                 if current_depth >= max_depth:
-                    # Count total replies that would be hidden
                     total_replies = _count_all_replies(node["replies"])
                     node["has_more_replies"] = total_replies > 0
                     node["reply_count"] = total_replies
@@ -359,7 +346,6 @@ class CommunityService:
 
         _limit_depth(top_level, 0)
 
-        # Cache the tree structure (without user-specific liked state)
         try:
             await MatchCache.set_generic(cache_key, top_level, ttl=10)
         except Exception as _e:
@@ -380,8 +366,6 @@ class CommunityService:
 
         return top_level
 
-    # ── Polls ──
-
     @staticmethod
     async def create_poll(session: AsyncSession, user_id: int, question: str, options: list[str]):
         if not question or not question.strip():
@@ -394,7 +378,6 @@ class CommunityService:
     async def list_polls(session: AsyncSession, user_id: int, limit: int = 10, offset: int = 0):
         """Batch query: 1 query for polls + options + user vote (was 21 queries)."""
         rows = await PollRepository.list_polls_batch(session, user_id, limit=limit, offset=offset)
-        # Group rows by poll_id
         from collections import OrderedDict
         polls_map = OrderedDict()
         for r in rows:
@@ -420,7 +403,6 @@ class CommunityService:
             if r.opt_id and r.opt_id not in polls_map[pid]["_seen_opts"]:
                 polls_map[pid]["_seen_opts"].add(r.opt_id)
                 polls_map[pid]["options"].append({"id": r.opt_id, "text": r.opt_text, "votes": r.opt_votes or 0})
-        # Clean up internal tracking
         for p in polls_map.values():
             del p["_seen_opts"]
         return list(polls_map.values())

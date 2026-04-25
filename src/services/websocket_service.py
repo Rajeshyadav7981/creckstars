@@ -1,5 +1,6 @@
 import json
 import asyncio
+import os
 from fastapi import WebSocket
 from src.database.redis.redis_client import redis_client
 from src.utils.logger import get_logger
@@ -7,14 +8,26 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-MAX_CONNECTIONS_PER_MATCH = 1000
+MAX_CONNECTIONS_PER_MATCH = int(os.getenv("WS_MAX_CONNECTIONS_PER_MATCH", "1000"))
+# Slow-client eviction: drop a connection after N consecutive send failures.
+WS_MAX_CONSECUTIVE_FAILURES = int(os.getenv("WS_MAX_CONSECUTIVE_FAILURES", "3"))
+# Per-send timeout (seconds) — anything longer means the client isn't draining.
+WS_SEND_TIMEOUT = float(os.getenv("WS_SEND_TIMEOUT_S", "3.0"))
 
 
 class ConnectionManager:
-    """Manages WebSocket connections per match with Redis Pub/Sub for multi-instance support."""
+    """Manages WebSocket connections per match with Redis Pub/Sub for multi-instance support.
+
+    Backpressure handling:
+      - ``_failures`` tracks consecutive failed sends per connection.
+      - Any send that times out or errors increments the counter and, if the
+        threshold is exceeded, the client is force-closed and removed.
+      - A successful send resets the counter so transient blips don't evict.
+    """
 
     def __init__(self):
         self.active_connections: dict[int, list[WebSocket]] = {}
+        self._failures: dict[int, int] = {}  # id(ws) -> consecutive failure count
         self._subscriber_task = None
 
     async def connect(self, websocket: WebSocket, match_id: int):
@@ -27,6 +40,7 @@ class ConnectionManager:
         if match_id not in self.active_connections:
             self.active_connections[match_id] = []
         self.active_connections[match_id].append(websocket)
+        self._failures[id(websocket)] = 0
         return True
 
     def disconnect(self, websocket: WebSocket, match_id: int):
@@ -35,6 +49,7 @@ class ConnectionManager:
                 self.active_connections[match_id].remove(websocket)
             if not self.active_connections[match_id]:
                 del self.active_connections[match_id]
+        self._failures.pop(id(websocket), None)
 
     async def broadcast(self, match_id: int, message: dict):
         """Publish to Redis channel + broadcast to local connections."""
@@ -52,22 +67,49 @@ class ConnectionManager:
         await self._broadcast_local(match_id, data)
 
     async def _broadcast_local(self, match_id: int, data: str):
-        """Send to all locally connected WebSocket clients."""
+        """Send to all locally connected WebSocket clients, evicting slow ones."""
         if match_id not in self.active_connections:
             return
         connections = list(self.active_connections[match_id])
 
         async def _send(ws: WebSocket):
-            await asyncio.wait_for(ws.send_text(data), timeout=5.0)
+            await asyncio.wait_for(ws.send_text(data), timeout=WS_SEND_TIMEOUT)
 
         results = await asyncio.gather(
             *(_send(ws) for ws in connections),
             return_exceptions=True,
         )
+
+        to_evict: list[WebSocket] = []
         for ws, result in zip(connections, results):
+            wsid = id(ws)
             if isinstance(result, Exception):
-                logger.info(f"WebSocket disconnected for match {match_id}")
-                self.disconnect(ws, match_id)
+                fails = self._failures.get(wsid, 0) + 1
+                self._failures[wsid] = fails
+                if (
+                    isinstance(result, asyncio.TimeoutError)
+                    or fails >= WS_MAX_CONSECUTIVE_FAILURES
+                ):
+                    logger.info(
+                        "Evicting slow/dead WebSocket",
+                        extra={"extra_data": {
+                            "match_id": match_id,
+                            "consecutive_failures": fails,
+                            "reason": type(result).__name__,
+                        }},
+                    )
+                    to_evict.append(ws)
+            else:
+                # Successful send — reset the failure counter.
+                if self._failures.get(wsid):
+                    self._failures[wsid] = 0
+
+        for ws in to_evict:
+            try:
+                await ws.close(code=1011, reason="slow client")
+            except Exception:
+                pass
+            self.disconnect(ws, match_id)
 
     async def start_subscriber(self):
         """Subscribe to Redis channels and forward to local WebSocket connections.

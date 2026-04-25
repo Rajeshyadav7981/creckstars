@@ -34,15 +34,22 @@ async def create_player(
             req.batting_style, req.bowling_style, req.role, req.profile_image,
             date_of_birth=req.date_of_birth, bio=req.bio,
             city=req.city, state_province=req.state_province, country=req.country,
+            is_guest=req.is_guest,
         )
-    return {"id": player.id, "full_name": player.full_name, "role": player.role}
+    return {
+        "id": player.id,
+        "full_name": player.full_name,
+        "role": player.role,
+        "is_guest": bool(getattr(player, "is_guest", False)),
+        "user_id": player.user_id,
+    }
 
 
 @router.get("")
 async def list_players(
     search: str = Query(None),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=10000),
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ):
@@ -91,4 +98,3 @@ async def get_player_stats(
     """Full career stats for a player — Redis-cached, viewer-aware."""
     viewer_id = user.id if user else None
     return await PlayerService.get_full_stats(session, player_id, viewer_id)
-

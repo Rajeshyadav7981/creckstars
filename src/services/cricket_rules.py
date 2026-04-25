@@ -14,7 +14,6 @@ class CricketRules:
         - Normal: total = batsman_runs. Swap if odd.
         """
         if extra_type == 'wide':
-            # Wide penalty (1) + any overthrows
             return (1 + extra_runs) % 2 == 1
         if extra_type in ('bye', 'legbye'):
             return extra_runs % 2 == 1

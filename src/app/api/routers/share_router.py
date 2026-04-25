@@ -32,6 +32,9 @@ from src.app.api.config import (
     APP_SCHEME, APP_PACKAGE_NAME, APP_DOWNLOAD_URL, APP_SHA256_FINGERPRINT,
     APK_DIR, get_app_version_info,
 )
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -355,7 +358,7 @@ async def share_match(request: Request, match_id: int):
                 else:
                     description = f"{match.overs}-over match on CrecKStars"
     except Exception as _e:
-        pass  # logged below not to crash hot path
+        logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
 
     return _build_redirect_html(
         title=title,
@@ -385,7 +388,7 @@ async def share_scorecard(request: Request, match_id: int):
                 tb_name = tb.name if tb else "Team B"
                 title = f"{ta_name} vs {tb_name} - Scorecard"
     except Exception as _e:
-        pass  # logged below not to crash hot path
+        logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
 
     return _build_redirect_html(
         title=title,
@@ -408,7 +411,7 @@ async def share_tournament(request: Request, tournament_id: int):
                 title = t.name or title
                 description = f"{t.name} - View standings, fixtures & results"
     except Exception as _e:
-        pass  # logged below not to crash hot path
+        logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
 
     return _build_redirect_html(
         title=title,

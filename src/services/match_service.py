@@ -1,19 +1,11 @@
-import random
-import string
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.repositories.match_repository import MatchRepository
 from src.database.postgres.repositories.innings_repository import InningsRepository
 from src.database.postgres.repositories.scorecard_repository import ScorecardRepository
-from src.database.postgres.repositories.match_event_repository import MatchEventRepository
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-def _generate_code(prefix: str = "M") -> str:
-    chars = string.ascii_uppercase + string.digits
-    return prefix + "".join(random.choices(chars, k=6))
 
 
 class MatchService:
@@ -27,14 +19,10 @@ class MatchService:
     async def create_match(session: AsyncSession, user_id: int, **kwargs):
         kwargs["created_by"] = user_id
         kwargs["scorer_user_id"] = user_id
-        # Auto-generate unique match code
-        for _ in range(10):
-            code = _generate_code("M")
-            existing = await MatchRepository.get_by_code(session, code)
-            if not existing:
-                kwargs["match_code"] = code
-                break
-        return await MatchRepository.create(session, kwargs)
+        # Repository generates match_code under the DB unique constraint.
+        match = await MatchRepository.create(session, kwargs)
+        await session.commit()
+        return match
 
     @staticmethod
     async def get_match(session: AsyncSession, match_id: int):
@@ -70,11 +58,13 @@ class MatchService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Toss decision must be 'bat' or 'bowl'")
         if toss_winner_id not in (match.team_a_id, match.team_b_id):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Toss winner must be one of the match teams")
-        return await MatchRepository.update(session, match_id, {
+        result = await MatchRepository.update(session, match_id, {
             "toss_winner_id": toss_winner_id,
             "toss_decision": toss_decision,
             "status": "toss",
         })
+        await session.commit()
+        return result
 
     @staticmethod
     async def set_squad(session: AsyncSession, match_id: int, team_id: int, players: list, user_id: int = None):
@@ -96,7 +86,9 @@ class MatchService:
                 "is_playing": True,
                 "batting_order": p.get("batting_order"),
             })
-        return await MatchRepository.set_squad(session, entries)
+        result = await MatchRepository.set_squad(session, entries)
+        await session.commit()
+        return result
 
     @staticmethod
     async def start_innings(session: AsyncSession, match_id: int, batting_team_id: int, striker_id: int, non_striker_id: int, bowler_id: int, user_id: int = None):
@@ -119,7 +111,6 @@ class MatchService:
 
         bowling_team_id = match.team_b_id if batting_team_id == match.team_a_id else match.team_a_id
 
-        # Determine target
         target = None
         if innings_number == 2:
             # 2nd innings: target = 1st innings runs + 1
@@ -144,21 +135,16 @@ class MatchService:
             "current_bowler_id": bowler_id,
         })
 
-        # Create batting scorecards for openers
         await ScorecardRepository.get_or_create_batting(session, innings.id, striker_id, position=1)
         await ScorecardRepository.get_or_create_batting(session, innings.id, non_striker_id, position=2)
-        # Create bowling scorecard for opening bowler
         await ScorecardRepository.get_or_create_bowling(session, innings.id, bowler_id)
-        # Create first over
         await InningsRepository.create_over(session, {
             "innings_id": innings.id,
             "over_number": 0,
             "bowler_id": bowler_id,
         })
-        # Create opening partnership
         await ScorecardRepository.get_or_create_partnership(session, innings.id, 0, striker_id, non_striker_id)
 
-        # Update match status
         await MatchRepository.update(session, match_id, {
             "status": "live",
             "current_innings": innings_number,
@@ -166,14 +152,18 @@ class MatchService:
 
         await session.commit()
 
-        # Auto-subscribe creator + squad players for push notifications (1st innings only)
+        # Auto-subscribe creator + squad players for push notifications (1st innings only).
+        # Tracked so the app drains it on shutdown instead of dropping mid-run.
         if innings_number == 1:
             try:
                 from src.services.notification_service import NotificationService
-                import asyncio
-                asyncio.create_task(NotificationService.auto_subscribe_match_participants(match_id))
+                from src.utils.background_tasks import fire_and_forget
+                fire_and_forget(
+                    NotificationService.auto_subscribe_match_participants(match_id),
+                    name=f"auto-subscribe-match-{match_id}",
+                )
             except Exception as e:
-                logger.warning(f"Failed to auto-subscribe match participants for match {match_id}: {e}")
+                logger.warning(f"Failed to schedule auto-subscribe for match {match_id}: {e}")
 
         return innings
 

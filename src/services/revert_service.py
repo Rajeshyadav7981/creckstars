@@ -21,7 +21,6 @@ class RevertService:
         match.result_summary = None
         match.result_type = None
 
-        # Reopen the last innings
         innings_list = await InningsRepository.get_by_match(session, match_id)
 
         if not innings_list:
@@ -42,7 +41,6 @@ class RevertService:
 
         await session.commit()
 
-        # Undo the last ball if there are deliveries
         from src.database.postgres.repositories.delivery_repository import DeliveryRepository
         last_delivery = await DeliveryRepository.get_last_delivery(session, last_innings.id)
         if last_delivery:

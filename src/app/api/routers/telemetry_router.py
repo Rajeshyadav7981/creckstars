@@ -1,9 +1,4 @@
-"""
-Telemetry Router — Error tracking + Analytics events
-=====================================================
-Receives error reports and analytics events from the frontend.
-Stores in PostgreSQL for analysis. No external service needed.
-"""
+"""Telemetry Router — receives error reports and analytics events from the frontend."""
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -43,7 +38,7 @@ async def report_errors(
     if not req.errors:
         return {"status": "ok", "count": 0}
 
-    for entry in req.errors[:50]:  # Max 50 per batch
+    for entry in req.errors[:50]:
         if entry.type == "error":
             logger.error(f"[CLIENT] {entry.message}", extra={"extra_data": {
                 "stack": entry.stack, "context": entry.context,
@@ -56,7 +51,6 @@ async def report_errors(
                 "version": entry.version, "user_id": user.id,
             }})
 
-    # Store in DB for dashboard analysis
     try:
         for entry in req.errors[:50]:
             await session.execute(text("""
