@@ -14,6 +14,7 @@ from src.database.postgres.repositories.match_event_repository import MatchEvent
 from src.services.websocket_service import ws_manager
 from src.services.cricket_rules import CricketRules
 from src.database.redis.match_cache import MatchCache
+from src.utils.background_tasks import fire_and_forget
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -467,7 +468,10 @@ class ScoringService:
             "field_zone": data.get("field_zone"),
             "batting_hand": data.get("batting_hand"),
         }
-        await ws_manager.broadcast(match_id, {"type": "delivery", "data": result})
+        fire_and_forget(
+            ws_manager.broadcast(match_id, {"type": "delivery", "data": result}),
+            name=f"ws_delivery_match_{match_id}",
+        )
 
         return result
 
@@ -544,7 +548,10 @@ class ScoringService:
         await session.commit()
         logger.info(f"Over ended: match={match_id} new_over={new_over}")
         result = {"over": new_over, "bowler_id": next_bowler_id}
-        await ws_manager.broadcast(match_id, {"type": "over_end", "data": result})
+        fire_and_forget(
+            ws_manager.broadcast(match_id, {"type": "over_end", "data": result}),
+            name=f"ws_over_end_match_{match_id}",
+        )
         return result
 
     @staticmethod
@@ -588,7 +595,10 @@ class ScoringService:
             "message": f"Innings {innings.innings_number} completed",
             "total_runs": innings.total_runs,
         }
-        await ws_manager.broadcast(match_id, {"type": "innings_end", "data": result})
+        fire_and_forget(
+            ws_manager.broadcast(match_id, {"type": "innings_end", "data": result}),
+            name=f"ws_innings_end_match_{match_id}",
+        )
         return result
 
     @staticmethod
@@ -670,7 +680,10 @@ class ScoringService:
         await TournamentStageService.on_match_completed(session, match_id)
 
         result = {"winner_id": winner_id, "result_summary": result_summary}
-        await ws_manager.broadcast(match_id, {"type": "match_end", "data": result})
+        fire_and_forget(
+            ws_manager.broadcast(match_id, {"type": "match_end", "data": result}),
+            name=f"ws_match_end_match_{match_id}",
+        )
         return result
 
     @staticmethod
@@ -700,5 +713,8 @@ class ScoringService:
             "current_non_striker_id": innings.current_striker_id,
         })
         await session.commit()
-        await ws_manager.broadcast(match_id, {"type": "delivery", "data": {"swap": True}})
+        fire_and_forget(
+            ws_manager.broadcast(match_id, {"type": "delivery", "data": {"swap": True}}),
+            name=f"ws_swap_match_{match_id}",
+        )
         return {"message": "Batters swapped"}

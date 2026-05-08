@@ -4,12 +4,19 @@ Usage:
     result = await cached("matches:user:123", ttl=15, fetcher=lambda: db_query())
 """
 import json
+import os
 from src.database.redis.redis_client import redis_client
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-CACHE_PREFIX = "api:"
+# Bump CACHE_SCHEMA_VERSION whenever a cached payload's shape changes (e.g.
+# you add/remove a field on a list or detail endpoint). The version is part
+# of the key, so a deploy with the new version effectively invalidates every
+# old payload — no manual flush needed, and no risk of clients reading stale
+# JSON that's missing fields the new code expects.
+CACHE_SCHEMA_VERSION = os.getenv("CACHE_SCHEMA_VERSION", "v2")
+CACHE_PREFIX = f"api:{CACHE_SCHEMA_VERSION}:"
 
 
 async def cached(key: str, ttl: int, fetcher):

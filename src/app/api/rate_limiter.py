@@ -38,18 +38,13 @@ def _get_user_or_ip(request: Request) -> str:
 
 _storage_uri = REDIS_URL if REDIS_URL else "memory://"
 _storage_options = {}
-if _storage_uri and _storage_uri.startswith("redis"):
-    try:
-        import redis as _sync_redis
-        _test = _sync_redis.from_url(_storage_uri, socket_timeout=2, ssl_cert_reqs=None)
-        _test.ping()
-        _test.close()
-        if _storage_uri.startswith("rediss://"):
-            _storage_options = {"ssl_cert_reqs": "none"}
-    except Exception:
-        logger.warning("Redis unavailable, using in-memory storage")
-        _storage_uri = "memory://"
-        _storage_options = {}
+if _storage_uri and _storage_uri.startswith("rediss://"):
+    # SSL Redis still needs the ssl_cert_reqs hint for slowapi's storage backend,
+    # but we no longer issue a synchronous PING at import time — that blocked
+    # FastAPI startup whenever Redis was slow to respond. slowapi handles
+    # connection failures lazily on first use and falls back gracefully; if
+    # Redis is truly down at boot, /health will show it.
+    _storage_options = {"ssl_cert_reqs": "none"}
 
 limiter = Limiter(
     key_func=_get_user_or_ip,

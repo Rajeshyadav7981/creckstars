@@ -338,6 +338,9 @@ CREATE INDEX IF NOT EXISTS ix_deliveries_innings ON deliveries (innings_id);
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_over_ball ON deliveries (innings_id, over_number, ball_number);
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_seq ON deliveries (innings_id, actual_ball_seq DESC);
 CREATE INDEX IF NOT EXISTS ix_deliveries_innings_created ON deliveries (innings_id, created_at DESC);
+-- Covering index for over-aggregates rollup (live scorecards): keeps the
+-- query index-only by carrying total_runs / is_wicket / extra_type / is_legal.
+CREATE INDEX IF NOT EXISTS ix_deliveries_innings_over_agg ON deliveries (innings_id, over_number) INCLUDE (total_runs, is_wicket, extra_type, is_legal);
 -- Guard against duplicate deliveries per innings under concurrent scoring.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_innings_seq ON deliveries (innings_id, actual_ball_seq);
 
@@ -549,6 +552,10 @@ CREATE TABLE IF NOT EXISTS poll_votes (
     user_id INTEGER NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+-- PostgreSQL does not auto-index FK columns, so these were seq-scanning.
+CREATE INDEX IF NOT EXISTS ix_polls_user_created ON polls (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_poll_options_poll ON poll_options (poll_id);
+CREATE INDEX IF NOT EXISTS ix_poll_votes_poll_user ON poll_votes (poll_id, user_id);
 
 
 -- ═══════════════════════════════════════

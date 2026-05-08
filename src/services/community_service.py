@@ -221,7 +221,9 @@ class CommunityService:
         post = await PostRepository.get_post(session, post_id)
         if post and post.comments_count > 0:
             post.comments_count -= 1
-            await session.commit()
+        # Commit unconditionally — the repo no longer commits, so without this
+        # the closure-table deletes would be rolled back when the session ends.
+        await session.commit()
         try:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()

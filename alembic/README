@@ -1,0 +1,40 @@
+Alembic migrations
+==================
+
+Schema changes land here as versioned revisions. Never edit the database by
+hand — write a revision instead.
+
+Commands (run from `backend/`, with `.env` populated)
+-----------------------------------------------------
+
+    alembic current                        # show the DB's current revision
+    alembic history                        # list all revisions
+    alembic upgrade head                   # apply all pending migrations
+    alembic upgrade +1                     # apply one
+    alembic downgrade -1                   # roll back one
+    alembic revision -m "add foo column"   # new empty revision (hand-write the upgrade)
+    alembic revision --autogenerate -m "…" # new revision diffed from the ORM models
+
+Workflow for a new column / index
+---------------------------------
+
+1. Edit the SQLAlchemy model under `src/database/postgres/schemas/`.
+2. `alembic revision --autogenerate -m "add X"`.
+3. Review the generated file — autogenerate misses some things
+   (check constraints, server defaults, renames). Fix up if needed.
+4. `alembic upgrade head` locally.
+5. Commit the revision file.
+6. On deploy, run `alembic upgrade head` before starting the new app version.
+
+Legacy baseline
+---------------
+
+The first revision (`812e715ead58`) is empty — it exists only so pre-Alembic
+databases can be stamped. `schema.sql` is retained as a reference for the
+initial shape but is NOT the source of truth going forward.
+
+If you spin up a fresh dev database, you currently still bootstrap via
+schema.sql; a future revision should replace that by generating the baseline
+from ORM metadata. Until then, after creating a fresh DB run:
+
+    alembic stamp head

@@ -100,6 +100,41 @@ async def upload_tournament_banner(
     return {"image_url": image_url, "banner_url": image_url}
 
 
+@router.get("/nearby")
+async def nearby_tournaments(
+    lat: float = Query(..., description="Latitude"),
+    lng: float = Query(..., description="Longitude"),
+    radius: float = Query(50, ge=1, le=500, description="Radius in km"),
+    limit: int = Query(20, ge=1, le=50),
+    session: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user_optional),
+):
+    """Tournaments whose home venue is within a radius of the caller.
+
+    Indexed via cube/earthdistance — see migration 4e2f9c7a13b5. Tournaments
+    without a venue (or with a venue missing coordinates) are excluded;
+    they wouldn't have a meaningful distance anyway.
+    """
+    from src.database.postgres.repositories.tournament_repository import TournamentRepository
+    rows = await TournamentRepository.get_nearby(session, lat, lng, radius, limit=limit)
+    return [
+        {
+            "id": r["id"], "tournament_code": r["tournament_code"], "name": r["name"],
+            "status": r["status"], "tournament_type": r["tournament_type"],
+            "start_date": str(r["start_date"]) if r["start_date"] else None,
+            "end_date": str(r["end_date"]) if r["end_date"] else None,
+            "organizer_name": r["organizer_name"], "location": r["location"],
+            "entry_fee": float(r["entry_fee"]) if r["entry_fee"] is not None else None,
+            "prize_pool": float(r["prize_pool"]) if r["prize_pool"] is not None else None,
+            "banner_url": r["banner_url"],
+            "venue_id": r["venue_id"], "venue_name": r["venue_name"],
+            "venue_city": r["venue_city"],
+            "distance_km": round(float(r["distance_km"]), 2),
+        }
+        for r in rows
+    ]
+
+
 @router.post("")
 @limiter.limit(RATE_LIMITS["create_tournament"])
 async def create_tournament(
@@ -723,6 +758,18 @@ async def delete_match(
     await session.execute(text("DELETE FROM innings WHERE match_id = :mid"), {"mid": match_id})
     await session.execute(text("DELETE FROM matches WHERE id = :mid"), {"mid": match_id})
     await session.commit()
+
+    # Drop every cache that referenced this match — otherwise viewers keep
+    # serving stale state/scorecard for up to TTL after the row is gone, and
+    # tournament leaderboards drift until the next scoring event refreshes them.
+    from src.database.redis.match_cache import MatchCache
+    await MatchCache.invalidate_match(match_id)
+    await LeaderboardCache.invalidate_tournament(tournament_id)
+    from src.utils.cache import invalidate, invalidate_pattern
+    await invalidate(f"tournament:{tournament_id}")
+    await MatchCache.set_generic(f"standings:{tournament_id}", None, ttl=1)
+    await invalidate_pattern(f"matches:u{match.created_by}:*")
+
     return {"status": "deleted", "match_id": match_id}
 
 
@@ -771,4 +818,14 @@ async def reset_stage(
     await TournamentStageRepository.update_stage(session, stage_id, {"status": "in_progress"})
     await TournamentRepository.update(session, tournament_id, {"status": "in_progress"})
     await session.commit()
+
+    # Same invalidation set as delete_match, but for every match we just wiped.
+    from src.database.redis.match_cache import MatchCache
+    for mid in mid_list:
+        await MatchCache.invalidate_match(mid)
+    await LeaderboardCache.invalidate_tournament(tournament_id)
+    from src.utils.cache import invalidate
+    await invalidate(f"tournament:{tournament_id}")
+    await MatchCache.set_generic(f"standings:{tournament_id}", None, ttl=1)
+
     return {"status": "reset", "stage_id": stage_id}

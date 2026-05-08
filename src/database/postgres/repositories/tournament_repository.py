@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 from src.database.postgres.schemas.tournament_schema import TournamentSchema
@@ -27,6 +27,50 @@ class TournamentRepository:
     async def get_by_code(session: AsyncSession, code: str) -> TournamentSchema | None:
         result = await session.execute(select(TournamentSchema).where(TournamentSchema.tournament_code == code))
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_nearby(
+        session: AsyncSession, lat: float, lng: float, radius_km: float = 50, limit: int = 50,
+    ) -> list:
+        """Tournaments whose venue is within ``radius_km`` of (lat, lng).
+
+        Tournaments without a venue (or whose venue lacks lat/lng) are
+        excluded — same behaviour as match nearby. Sorted by distance, then
+        soonest start_date so live/upcoming events surface first within a
+        ring.
+
+        Backed by the GIST index on ll_to_earth(venues.latitude, longitude).
+        """
+        radius_m = float(radius_km) * 1000.0
+        query = text(
+            """
+            SELECT t.id, t.tournament_code, t.name, t.status, t.tournament_type,
+                   t.start_date, t.end_date, t.organizer_name, t.location,
+                   t.entry_fee, t.prize_pool, t.banner_url, t.created_at,
+                   t.venue_id, v.name AS venue_name, v.city AS venue_city,
+                   v.latitude, v.longitude,
+                   earth_distance(
+                       ll_to_earth(:lat, :lng),
+                       ll_to_earth(v.latitude, v.longitude)
+                   ) / 1000.0 AS distance_km
+            FROM tournaments t
+            JOIN venues v ON t.venue_id = v.id
+            WHERE v.latitude IS NOT NULL
+              AND v.longitude IS NOT NULL
+              AND ll_to_earth(v.latitude, v.longitude)
+                  <@ earth_box(ll_to_earth(:lat, :lng), :radius_m)
+              AND earth_distance(
+                    ll_to_earth(:lat, :lng),
+                    ll_to_earth(v.latitude, v.longitude)
+                  ) <= :radius_m
+            ORDER BY distance_km, t.start_date NULLS LAST
+            LIMIT :limit
+            """
+        )
+        result = await session.execute(query, {
+            "lat": lat, "lng": lng, "radius_m": radius_m, "limit": limit,
+        })
+        return result.mappings().all()
 
     _LIST_COLS = [
         TournamentSchema.id, TournamentSchema.tournament_code, TournamentSchema.name,

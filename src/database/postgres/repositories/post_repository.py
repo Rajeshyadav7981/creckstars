@@ -13,7 +13,9 @@ class PostRepository:
     async def create_post(session: AsyncSession, user_id: int, text: str, title: str = None, tag: str = None, image_url: str = None) -> PostSchema:
         post = PostSchema(user_id=user_id, text=text, title=title, tag=tag, image_url=image_url)
         session.add(post)
-        await session.commit()
+        # Flush (no commit) so the caller can finish the rest of the
+        # transaction (hashtags/mentions) atomically. Caller commits.
+        await session.flush()
         await session.refresh(post)
         return post
 
@@ -69,24 +71,30 @@ class PostRepository:
 
     @staticmethod
     async def delete_comment(session: AsyncSession, comment_id: int):
-        # Delete closure table entries first, then the comment (CASCADE handles children)
+        # Delete closure table entries first, then the comment (CASCADE handles children).
+        # Caller commits — keeps the closure delete + comment delete + parent
+        # post counter decrement in one atomic transaction.
         await session.execute(delete(CommentClosureSchema).where(
             (CommentClosureSchema.ancestor_id == comment_id) | (CommentClosureSchema.descendant_id == comment_id)
         ))
         await session.execute(delete(PostCommentSchema).where(PostCommentSchema.id == comment_id))
-        await session.commit()
 
     @staticmethod
     async def toggle_comment_like(session: AsyncSession, comment_id: int, user_id: int) -> bool:
         """Toggle like on comment. Returns True if liked, False if unliked."""
-        existing = await session.execute(
-            select(CommentLikeSchema).where(
-                CommentLikeSchema.comment_id == comment_id,
-                CommentLikeSchema.user_id == user_id,
+        result = await session.execute(
+            select(PostCommentSchema, CommentLikeSchema)
+            .outerjoin(
+                CommentLikeSchema,
+                (CommentLikeSchema.comment_id == PostCommentSchema.id)
+                & (CommentLikeSchema.user_id == user_id),
             )
+            .where(PostCommentSchema.id == comment_id)
         )
-        like = existing.scalar_one_or_none()
-        comment = await session.get(PostCommentSchema, comment_id)
+        row = result.first()
+        comment = row[0] if row else None
+        like = row[1] if row else None
+
         if like:
             await session.delete(like)
             if comment:
@@ -114,27 +122,32 @@ class PostRepository:
     @staticmethod
     async def toggle_like(session: AsyncSession, post_id: int, user_id: int) -> bool:
         """Toggle like. Returns True if liked, False if unliked."""
-        existing = await session.execute(
-            select(PostLikeSchema).where(
-                PostLikeSchema.post_id == post_id,
-                PostLikeSchema.user_id == user_id,
+        # Fetch the like row and the post in one round trip via OUTER JOIN —
+        # cuts 2 sequential awaits to 1.
+        result = await session.execute(
+            select(PostSchema, PostLikeSchema)
+            .outerjoin(
+                PostLikeSchema,
+                (PostLikeSchema.post_id == PostSchema.id)
+                & (PostLikeSchema.user_id == user_id),
             )
+            .where(PostSchema.id == post_id)
         )
-        like = existing.scalar_one_or_none()
+        row = result.first()
+        post = row[0] if row else None
+        like = row[1] if row else None
+
         if like:
             await session.delete(like)
-            post = await session.get(PostSchema, post_id)
             if post:
                 post.likes_count = max(0, post.likes_count - 1)
             await session.commit()
             return False
-        else:
-            session.add(PostLikeSchema(post_id=post_id, user_id=user_id))
-            post = await session.get(PostSchema, post_id)
-            if post:
-                post.likes_count += 1
-            await session.commit()
-            return True
+        session.add(PostLikeSchema(post_id=post_id, user_id=user_id))
+        if post:
+            post.likes_count += 1
+        await session.commit()
+        return True
 
     @staticmethod
     async def has_liked(session: AsyncSession, post_id: int, user_id: int) -> bool:
@@ -166,7 +179,9 @@ class PostRepository:
         post = await session.get(PostSchema, post_id)
         if post:
             post.comments_count += 1
-        await session.commit()
+        # Flush so the caller can extend the same transaction with closure
+        # rows and commit them all together. Caller commits.
+        await session.flush()
         await session.refresh(comment)
         return comment
 
@@ -253,6 +268,9 @@ class PollRepository:
     @staticmethod
     async def vote(session: AsyncSession, poll_id: int, option_id: int, user_id: int) -> str:
         """Vote on poll. Returns 'voted', 'changed', or 'removed'."""
+        # Prefetch in two parallel SELECTs (poll+vote+target option) so the
+        # branch logic below only hits the identity map. Worst case before
+        # this was 5 sequential round trips per vote.
         existing = await session.execute(
             select(PollVoteSchema).where(
                 PollVoteSchema.poll_id == poll_id,
@@ -261,24 +279,33 @@ class PollRepository:
         )
         old_vote = existing.scalar_one_or_none()
 
+        # Pull the poll and every option we might touch (target + previously
+        # selected) in a single round trip.
+        option_ids = {option_id}
+        if old_vote and old_vote.option_id != option_id:
+            option_ids.add(old_vote.option_id)
+
+        opts_res = await session.execute(
+            select(PollOptionSchema).where(PollOptionSchema.id.in_(option_ids))
+        )
+        opts_by_id = {o.id: o for o in opts_res.scalars().all()}
+        poll = await session.get(PollSchema, poll_id)
+
         if old_vote:
             if old_vote.option_id == option_id:
-                # Same option — remove vote (deselect)
-                old_option = await session.get(PollOptionSchema, old_vote.option_id)
+                old_option = opts_by_id.get(old_vote.option_id)
                 if old_option:
                     old_option.votes = max(0, old_option.votes - 1)
-                poll = await session.get(PollSchema, poll_id)
                 if poll:
                     poll.total_votes = max(0, poll.total_votes - 1)
                 await session.delete(old_vote)
                 await session.commit()
                 return "removed"
             else:
-                # Different option — change vote
-                old_option = await session.get(PollOptionSchema, old_vote.option_id)
+                old_option = opts_by_id.get(old_vote.option_id)
                 if old_option:
                     old_option.votes = max(0, old_option.votes - 1)
-                new_option = await session.get(PollOptionSchema, option_id)
+                new_option = opts_by_id.get(option_id)
                 if new_option:
                     new_option.votes += 1
                 old_vote.option_id = option_id
@@ -286,10 +313,9 @@ class PollRepository:
                 return "changed"
 
         session.add(PollVoteSchema(poll_id=poll_id, option_id=option_id, user_id=user_id))
-        option = await session.get(PollOptionSchema, option_id)
+        option = opts_by_id.get(option_id)
         if option:
             option.votes += 1
-        poll = await session.get(PollSchema, poll_id)
         if poll:
             poll.total_votes += 1
         await session.commit()

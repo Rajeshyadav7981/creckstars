@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from src.database.postgres.db import get_async_db
 from src.database.postgres.schemas.push_token_schema import PushTokenSchema, MatchSubscriptionSchema
+from src.services.notification_service import NotificationService
 from src.utils.security import get_current_user
 from src.app.api.routers.models.notification_model import PushTokenRequest, RemovePushTokenRequest
 
@@ -26,6 +27,7 @@ async def register_push_token(
         )
     )
     row = existing.scalar_one_or_none()
+    is_new = row is None
     if row:
         row.device_type = device_type
     else:
@@ -35,6 +37,9 @@ async def register_push_token(
             device_type=device_type,
         ))
     await session.commit()
+    if is_new:
+        # Token list for every match this user follows just changed.
+        await NotificationService.invalidate_user_token_caches(user.id)
     return {"status": "registered"}
 
 
@@ -54,6 +59,7 @@ async def remove_push_token(
             )
         )
         await session.commit()
+        await NotificationService.invalidate_user_token_caches(user.id)
     return {"status": "removed"}
 
 
@@ -76,6 +82,7 @@ async def subscribe_to_match(
             match_id=match_id,
         ))
         await session.commit()
+        await NotificationService.invalidate_match_tokens(match_id)
     return {"status": "subscribed"}
 
 
@@ -93,6 +100,7 @@ async def unsubscribe_from_match(
         )
     )
     await session.commit()
+    await NotificationService.invalidate_match_tokens(match_id)
     return {"status": "unsubscribed"}
 
 

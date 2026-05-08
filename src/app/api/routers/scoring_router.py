@@ -152,6 +152,7 @@ async def end_over(
 
 @router.post("/{match_id}/end-innings")
 @limiter.limit(RATE_LIMITS["end_innings"])
+@idempotent(ttl_seconds=600)
 async def end_innings(
     request: Request,
     match_id: int,

@@ -61,6 +61,35 @@ class NotificationService:
                         await asyncio.sleep(2 ** attempt)  # 1s, 2s backoff
 
     @staticmethod
+    async def invalidate_match_tokens(match_id: int) -> None:
+        """Drop the cached push-token list for a match so the next push fanout
+        re-reads from DB. Call this on subscribe/unsubscribe and on
+        push-token register/remove for any user — otherwise users miss pushes
+        (or get them after unsubscribing) for up to 60s."""
+        try:
+            r = await redis_client.get_client()
+            if r:
+                await r.delete(f"push_tokens:{match_id}")
+        except Exception as e:
+            logger.warning(f"Push-token cache invalidate failed: {e}")
+
+    @staticmethod
+    async def invalidate_user_token_caches(user_id: int) -> None:
+        """When a user's push token list changes (login/logout), drop every
+        match cache they're subscribed to. Bounded by their subscription set,
+        not by global match count."""
+        try:
+            async with db.AsyncSessionLocal() as session:
+                result = await session.execute(text(
+                    "SELECT match_id FROM match_subscriptions WHERE user_id = :uid"
+                ), {"uid": user_id})
+                match_ids = [row[0] for row in result.all()]
+            for mid in match_ids:
+                await NotificationService.invalidate_match_tokens(mid)
+        except Exception as e:
+            logger.warning(f"Per-user token cache invalidate failed: {e}")
+
+    @staticmethod
     async def get_all_match_tokens(match_id: int) -> list:
         """Get push tokens for ALL users who should be notified about this match."""
         # Uses Redis cache (60s TTL) to avoid DB query on every scoring event.

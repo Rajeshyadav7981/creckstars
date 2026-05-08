@@ -246,9 +246,13 @@ async def _otp_record_failure(mobile: str, purpose: str):
         if not r:
             return
         key = f"otp_fails:{mobile}:{purpose}"
-        n = await r.incr(key)
-        if n == 1:
-            await r.expire(key, OTP_LOCKOUT_MINUTES * 60)
+        # Pipeline INCR+EXPIRE so a crash between the two can't leave the
+        # counter unbounded. EXPIRE on every increment is idempotent (it just
+        # re-arms the same TTL) and removes the n==1 race.
+        pipe = r.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, OTP_LOCKOUT_MINUTES * 60)
+        await pipe.execute()
     except Exception:
         return
 
@@ -321,21 +325,45 @@ async def send_otp(
                         "template_id": SMS_TEMPLATE_ID,
                     },
                 )
-                result = resp.json()
-                if result.get("type") == "error":
+                # MSG91 returns 200 even on logical errors; the body's `type`
+                # field is the real signal. Log the full body on non-success
+                # so DLT/template/sender-id rejections (e.g. error code 204)
+                # can be diagnosed without guessing.
+                try:
+                    result = resp.json()
+                except ValueError:
+                    result = {"type": "error", "message": resp.text[:300]}
+                if result.get("type") == "error" or resp.status_code >= 400:
                     logger.warning(
                         "MSG91 rejected OTP send",
-                        extra={"extra_data": {"mobile": _mask_mobile(mobile), "msg91": result.get("message")}},
+                        extra={"extra_data": {
+                            "mobile": _mask_mobile(mobile),
+                            "http_status": resp.status_code,
+                            "msg91_type": result.get("type"),
+                            "msg91_code": result.get("code"),
+                            "msg91_message": result.get("message"),
+                            "msg91_request_id": result.get("request_id"),
+                            "template_id_tail": (SMS_TEMPLATE_ID or "")[-6:],
+                        }},
                     )
                     raise HTTPException(status_code=500, detail="SMS service could not send. Try again.")
                 if result.get("type") != "success":
                     logger.warning(
                         "MSG91 unexpected response",
-                        extra={"extra_data": {"mobile": _mask_mobile(mobile), "msg91_type": result.get("type")}},
+                        extra={"extra_data": {
+                            "mobile": _mask_mobile(mobile),
+                            "msg91_type": result.get("type"),
+                            "msg91_message": result.get("message"),
+                            "msg91_request_id": result.get("request_id"),
+                        }},
                     )
                 logger.info(
                     "OTP dispatched",
-                    extra={"extra_data": {"mobile": _mask_mobile(mobile), "purpose": data.purpose}},
+                    extra={"extra_data": {
+                        "mobile": _mask_mobile(mobile),
+                        "purpose": data.purpose,
+                        "msg91_request_id": result.get("request_id"),
+                    }},
                 )
         except httpx.HTTPError as e:
             logger.error(

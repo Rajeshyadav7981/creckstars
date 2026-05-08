@@ -271,32 +271,45 @@ class MatchRepository:
         return result.all()
 
     @staticmethod
-    async def get_nearby(session: AsyncSession, lat: float, lng: float, radius: float) -> list:
-        """Find matches at venues within a given radius (km) using Haversine formula."""
-        query = text("""
+    async def get_nearby(
+        session: AsyncSession, lat: float, lng: float, radius: float, limit: int = 50
+    ) -> list:
+        """Matches at venues within ``radius`` km of (lat, lng), nearest first.
+
+        Hits the venues GIST index (ix_venues_earth) via earth_box; the
+        earth_distance refinement trims the bbox to a circle and supplies
+        the sort key.
+        """
+        radius_m = float(radius) * 1000.0
+        query = text(
+            """
             SELECT m.id, m.match_code, m.status, m.team_a_id, m.team_b_id,
                    m.overs, m.match_date, m.tournament_id, m.venue_id,
-                   v.name as venue_name, v.latitude, v.longitude,
-                   ta.name as team_a_name, tb.name as team_b_name,
-                   (6371 * acos(
-                       LEAST(1.0, cos(radians(:lat)) * cos(radians(v.latitude))
-                       * cos(radians(v.longitude) - radians(:lng))
-                       + sin(radians(:lat)) * sin(radians(v.latitude)))
-                   )) AS distance_km
+                   v.name AS venue_name, v.latitude, v.longitude,
+                   ta.name AS team_a_name, tb.name AS team_b_name,
+                   earth_distance(
+                       ll_to_earth(:lat, :lng),
+                       ll_to_earth(v.latitude, v.longitude)
+                   ) / 1000.0 AS distance_km
             FROM matches m
             JOIN venues v ON m.venue_id = v.id
             JOIN teams ta ON m.team_a_id = ta.id
             JOIN teams tb ON m.team_b_id = tb.id
-            WHERE v.latitude IS NOT NULL AND v.longitude IS NOT NULL
-            AND (6371 * acos(
-                LEAST(1.0, cos(radians(:lat)) * cos(radians(v.latitude))
-                * cos(radians(v.longitude) - radians(:lng))
-                + sin(radians(:lat)) * sin(radians(v.latitude)))
-            )) <= :radius
+            WHERE v.latitude IS NOT NULL
+              AND v.longitude IS NOT NULL
+              AND ll_to_earth(v.latitude, v.longitude)
+                  <@ earth_box(ll_to_earth(:lat, :lng), :radius_m)
+              AND earth_distance(
+                    ll_to_earth(:lat, :lng),
+                    ll_to_earth(v.latitude, v.longitude)
+                  ) <= :radius_m
             ORDER BY distance_km, m.match_date
-            LIMIT 50
-        """)
-        result = await session.execute(query, {"lat": lat, "lng": lng, "radius": radius})
+            LIMIT :limit
+            """
+        )
+        result = await session.execute(query, {
+            "lat": lat, "lng": lng, "radius_m": radius_m, "limit": limit,
+        })
         return result.mappings().all()
 
     @staticmethod

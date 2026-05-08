@@ -52,18 +52,38 @@ async def get_live_state(
     if cached:
         return cached
 
+    # Per-process lock first (cheap; coalesces requests on this worker).
     async with _get_lock(f"ls:{match_id}"):
         cached = await MatchCache.get_live_state(match_id)
         if cached:
             return cached
 
-        state = await ScorecardService.get_live_state(session, match_id)
-        if not state:
-            return {"error": "Match not found"}
-        # Completed matches: cache 5 min; live: 5s (hot poll path)
-        ttl = 300 if state.get("status") == "completed" else 5
-        await MatchCache.set_live_state(match_id, state, ttl=ttl)
-        return state
+        # Cross-process single-flight via Redis SETNX. Under heavy load with
+        # many workers, this stops every worker from racing to the DB on a
+        # shared cache miss.
+        lock_name = f"ls:{match_id}"
+        got_lock = await MatchCache.try_acquire_refresh_lock(lock_name, ttl=10)
+        if not got_lock:
+            # Another worker is already computing — give it a brief moment, then
+            # serve whatever it wrote. If it's still not there, fall through and
+            # compute ourselves so a stuck owner can't starve clients.
+            for _ in range(6):
+                await asyncio.sleep(0.05)
+                cached = await MatchCache.get_live_state(match_id)
+                if cached:
+                    return cached
+
+        try:
+            state = await ScorecardService.get_live_state(session, match_id)
+            if not state:
+                return {"error": "Match not found"}
+            # Completed matches: cache 5 min; live: 5s (hot poll path)
+            ttl = 300 if state.get("status") == "completed" else 5
+            await MatchCache.set_live_state(match_id, state, ttl=ttl)
+            return state
+        finally:
+            if got_lock:
+                await MatchCache.release_refresh_lock(lock_name)
 
 
 @router.get("/{match_id}/commentary")
@@ -71,7 +91,7 @@ async def get_commentary(
     match_id: int,
     innings_number: int = Query(None),
     limit: int = Query(20, ge=1, le=100),
-    offset: int = Query(0, ge=0, le=10000),
+    offset: int = Query(0, ge=0, le=1000),  # commentary deep-scroll capped — past 1000 callers should keyset by sequence
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user_optional),
 ):
