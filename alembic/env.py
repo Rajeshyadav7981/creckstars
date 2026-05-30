@@ -42,7 +42,6 @@ import src.database.postgres.schemas.batting_scorecard_schema  # noqa: F401, E40
 import src.database.postgres.schemas.bowling_scorecard_schema  # noqa: F401, E402
 import src.database.postgres.schemas.fall_of_wicket_schema  # noqa: F401, E402
 import src.database.postgres.schemas.partnership_schema  # noqa: F401, E402
-import src.database.postgres.schemas.otp_schema  # noqa: F401, E402
 import src.database.postgres.schemas.post_schema  # noqa: F401, E402
 import src.database.postgres.schemas.push_token_schema  # noqa: F401, E402
 

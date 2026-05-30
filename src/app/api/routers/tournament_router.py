@@ -83,20 +83,13 @@ async def upload_tournament_banner(
         raise HTTPException(status_code=400, detail="File is not a valid image.")
 
     # Banner is landscape — compressor caps at 1600px wide and lands ≤ 2 MB.
+    import asyncio as _asyncio
     from src.utils.image_compress import compress_to_target_size
-    content = compress_to_target_size(img, target_bytes=2 * 1024 * 1024, max_width=1600)
+    content = await _asyncio.to_thread(compress_to_target_size, img, 2 * 1024 * 1024, 1600)
 
-    tournaments_dir = os.path.join(UPLOADS_DIR, "tournaments")
-    os.makedirs(tournaments_dir, exist_ok=True)
+    from src.services.storage_service import save_image
     filename = f"{user.id}_{uuid.uuid4().hex}.jpg"
-    filepath = os.path.join(tournaments_dir, filename)
-    resolved = os.path.realpath(filepath)
-    if not resolved.startswith(os.path.realpath(tournaments_dir) + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid upload path.")
-    with open(filepath, "wb") as f:
-        f.write(content)
-
-    image_url = f"/uploads/tournaments/{filename}"
+    image_url = await save_image(content, "tournaments", filename)
     return {"image_url": image_url, "banner_url": image_url}
 
 
@@ -250,8 +243,13 @@ async def get_tournament(
     async def _fetch_detail():
         return await _build_tournament_response(session, tournament_id)
 
-    # Cache tournament detail for 15s (invalidated on match/stage changes)
-    return await _cached(f"tournament:{tournament_id}", ttl=30, fetcher=_fetch_detail)
+    response = await _cached(f"tournament:{tournament_id}", ttl=30, fetcher=_fetch_detail)
+    if user:
+        from src.database.postgres.repositories.favorite_repository import FavoriteRepository
+        is_fav = await FavoriteRepository.is_tournament_favorite(session, user.id, tournament_id)
+        response = dict(response)
+        response["is_favorite"] = is_fav
+    return response
 
 
 async def _build_tournament_response(session, tournament_id):
@@ -263,12 +261,15 @@ async def _build_tournament_response(session, tournament_id):
 
     def serialize_match(m):
         match_data = {
-            "id": m.id, "status": m.status, "team_a_id": m.team_a_id, "team_b_id": m.team_b_id,
+            "id": m.id, "name": m.name, "status": m.status, "team_a_id": m.team_a_id, "team_b_id": m.team_b_id,
             "overs": m.overs, "winner_id": m.winner_id, "result_summary": m.result_summary,
             "match_type": m.match_type, "current_innings": m.current_innings,
             "match_date": str(m.match_date) if m.match_date else None,
             "time_slot": m.time_slot,
             "match_number": m.match_number,
+            "match_code": m.match_code,
+            "toss_winner_id": m.toss_winner_id,
+            "toss_decision": m.toss_decision,
             "stage_id": m.stage_id,
             "group_id": m.group_id,
             "stage_name": stage_map.get(m.stage_id, None) if m.stage_id else None,
@@ -337,6 +338,8 @@ async def update_tournament(
     if update:
         await TournamentRepository.update(session, tournament_id, update)
         await session.commit()
+        from src.utils.cache import invalidate as _inv
+        await _inv(f"tournament:{tournament_id}")
     return {"message": "Updated", "updated_fields": list(update.keys())}
 
 
@@ -393,41 +396,17 @@ async def get_tournament_leaderboard(
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user_optional),
 ):
-    # Try Redis sorted-set cache first
-    cached_batsmen = await LeaderboardCache.get_top_batsmen(tournament_id)
-    cached_bowlers = await LeaderboardCache.get_top_bowlers(tournament_id)
-    if cached_batsmen is not None and cached_bowlers is not None:
-        # Keep the response shape consistent regardless of cache state.
-        # The Redis sorted-set cache only stores batsmen + bowlers, so the
-        # other two lists come back empty on cache hit (the next miss will
-        # repopulate them from SQL). Frontend already handles empty arrays.
-        return {
-            "tournament_id": tournament_id,
-            "top_batsmen": cached_batsmen,
-            "top_bowlers": cached_bowlers,
-            "top_fielders": [],
-            "highest_scores": [],
-        }
+    from src.database.redis.match_cache import MatchCache
+    cache_key = f"leaderboard:{tournament_id}"
+    cached = await MatchCache.get_generic(cache_key)
+    if cached is not None:
+        return {"tournament_id": tournament_id, **cached}
 
-    # Cache miss -- fall back to SQL
     leaderboard = await TournamentService.get_leaderboard(session, tournament_id)
-
-    # Populate Redis sorted sets for next request
     try:
-        for b in leaderboard.get("top_batsmen", []):
-            await LeaderboardCache.update_batting_stats(
-                tournament_id, b["player_id"], b["player_name"],
-                b.get("runs", 0), b.get("balls_faced", 0),
-                b.get("fours", 0), b.get("sixes", 0),
-            )
-        for bw in leaderboard.get("top_bowlers", []):
-            await LeaderboardCache.update_bowling_stats(
-                tournament_id, bw["player_id"], bw["player_name"],
-                bw.get("wickets", 0), bw.get("runs_conceded", 0),
-                bw.get("overs", 0),
-            )
+        await MatchCache.set_generic(cache_key, leaderboard, ttl=60)
     except Exception as e:
-        logger.warning(f"Leaderboard cache population failed for tournament {tournament_id}: {e}")
+        logger.warning(f"Leaderboard cache write failed for tournament {tournament_id}: {e}")
 
     return {"tournament_id": tournament_id, **leaderboard}
 
@@ -451,12 +430,11 @@ async def setup_stages(
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ):
-    stages_config = [{"name": s.name, "qualification_rule": s.qualification_rule} for s in req.stages]
+    stages_config = [{"name": s.name, "label": s.label, "qualification_rule": s.qualification_rule} for s in req.stages]
     stages = await TournamentStageService.setup_stages(session, tournament_id, stages_config)
-    # Drop the cached tournament detail so the new stage is visible immediately
     from src.utils.cache import invalidate as _invalidate_cache
     await _invalidate_cache(f"tournament:{tournament_id}")
-    return {"stages": [{"id": s.id, "stage_name": s.stage_name, "stage_order": s.stage_order} for s in stages]}
+    return {"stages": [{"id": s.id, "stage_name": s.stage_name, "stage_label": s.stage_label, "stage_order": s.stage_order} for s in stages]}
 
 
 @router.get("/{tournament_id}/qualified-teams")
@@ -660,22 +638,17 @@ async def delete_stage(
     if not stage or stage.tournament_id != tournament_id:
         raise HTTPException(status_code=404, detail="Stage not found")
 
-    from sqlalchemy import text
-    # Delete matches in this stage (cascades to deliveries, scorecards, etc.)
-    await session.execute(text(
-        "DELETE FROM matches WHERE stage_id = :sid AND tournament_id = :tid"
-    ), {"sid": stage_id, "tid": tournament_id})
-    # Delete group teams
-    await session.execute(text(
-        "DELETE FROM tournament_group_teams WHERE group_id IN (SELECT id FROM tournament_groups WHERE stage_id = :sid)"
-    ), {"sid": stage_id})
-    # Delete groups
-    await session.execute(text("DELETE FROM tournament_groups WHERE stage_id = :sid"), {"sid": stage_id})
-    # Delete stage
-    await session.execute(text("DELETE FROM tournament_stages WHERE id = :sid"), {"sid": stage_id})
-    # Reset tournament status if needed
-    await TournamentRepository.update(session, tournament_id, {"status": "in_progress"})
-    await session.commit()
+    mid_list = await TournamentService.delete_stage_data(session, tournament_id, stage_id)
+
+    from src.database.redis.match_cache import MatchCache
+    for mid in mid_list:
+        await MatchCache.invalidate_match(mid)
+    await LeaderboardCache.invalidate_tournament(tournament_id)
+    await MatchCache.set_generic(f"leaderboard:{tournament_id}", None)
+    from src.utils.cache import invalidate
+    await invalidate(f"tournament:{tournament_id}")
+    await MatchCache.set_generic(f"standings:{tournament_id}", None, ttl=1)
+
     return {"status": "deleted", "stage_id": stage_id}
 
 
@@ -725,6 +698,14 @@ async def override_match_result(
     except Exception as e:
         logger.error(f"Stage progression failed after match override for match {match_id}: {e}")
 
+    from src.database.redis.match_cache import MatchCache as _MC
+    from src.utils.cache import invalidate as _inv
+    await _MC.invalidate_match(match_id)
+    await _inv(f"tournament:{tournament_id}")
+    await _MC.set_generic(f"standings:{tournament_id}", None, ttl=1)
+    await _MC.set_generic(f"leaderboard:{tournament_id}", None, ttl=1)
+    await LeaderboardCache.invalidate_tournament(tournament_id)
+
     return {"status": "overridden", "winner_id": winner_id, "result_type": result_type, "result_summary": summary}
 
 
@@ -745,19 +726,7 @@ async def delete_match(
     if not match or match.tournament_id != tournament_id:
         raise HTTPException(status_code=404, detail="Match not found in this tournament")
 
-    from sqlalchemy import text
-    # Delete all scoring data (deliveries, scorecards, etc.)
-    await session.execute(text("DELETE FROM deliveries WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)"), {"mid": match_id})
-    await session.execute(text("DELETE FROM batting_scorecards WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)"), {"mid": match_id})
-    await session.execute(text("DELETE FROM bowling_scorecards WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)"), {"mid": match_id})
-    await session.execute(text("DELETE FROM fall_of_wickets WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)"), {"mid": match_id})
-    await session.execute(text("DELETE FROM partnerships WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)"), {"mid": match_id})
-    await session.execute(text("DELETE FROM overs WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)"), {"mid": match_id})
-    await session.execute(text("DELETE FROM match_events WHERE match_id = :mid"), {"mid": match_id})
-    await session.execute(text("DELETE FROM match_squads WHERE match_id = :mid"), {"mid": match_id})
-    await session.execute(text("DELETE FROM innings WHERE match_id = :mid"), {"mid": match_id})
-    await session.execute(text("DELETE FROM matches WHERE id = :mid"), {"mid": match_id})
-    await session.commit()
+    await TournamentService.delete_match_data(session, match_id)
 
     # Drop every cache that referenced this match — otherwise viewers keep
     # serving stale state/scorecard for up to TTL after the row is gone, and
@@ -765,6 +734,8 @@ async def delete_match(
     from src.database.redis.match_cache import MatchCache
     await MatchCache.invalidate_match(match_id)
     await LeaderboardCache.invalidate_tournament(tournament_id)
+    from src.database.redis.match_cache import MatchCache as _MC
+    await _MC.set_generic(f"leaderboard:{tournament_id}", None)
     from src.utils.cache import invalidate, invalidate_pattern
     await invalidate(f"tournament:{tournament_id}")
     await MatchCache.set_generic(f"standings:{tournament_id}", None, ttl=1)
@@ -790,40 +761,15 @@ async def reset_stage(
     if not stage or stage.tournament_id != tournament_id:
         raise HTTPException(status_code=404, detail="Stage not found")
 
-    from sqlalchemy import text
-    # Delete all matches in this stage
-    match_ids_result = await session.execute(text("SELECT id FROM matches WHERE stage_id = :sid"), {"sid": stage_id})
-    mid_list = [r[0] for r in match_ids_result.all()]
-    for mid in mid_list:
-        # Delete in FK order (children first)
-        for tbl in ["deliveries", "batting_scorecards", "bowling_scorecards", "fall_of_wickets", "partnerships", "overs"]:
-            try:
-                await session.execute(text(f"DELETE FROM {tbl} WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)"), {"mid": mid})
-            except Exception as e:
-                logger.warning(f"Failed to delete from {tbl} for match {mid} during stage reset: {e}")
-        for tbl in ["match_events", "match_squads", "match_subscriptions"]:
-            try:
-                await session.execute(text(f"DELETE FROM {tbl} WHERE match_id = :mid"), {"mid": mid})
-            except Exception as e:
-                logger.warning(f"Failed to delete from {tbl} for match {mid} during stage reset: {e}")
-        await session.execute(text("DELETE FROM innings WHERE match_id = :mid"), {"mid": mid})
-    await session.execute(text("DELETE FROM matches WHERE stage_id = :sid"), {"sid": stage_id})
-
-    # Reset qualification status for teams in this stage
-    await session.execute(text(
-        "UPDATE tournament_group_teams SET qualification_status = NULL WHERE group_id IN (SELECT id FROM tournament_groups WHERE stage_id = :sid)"
-    ), {"sid": stage_id})
-
-    # Reset stage status
-    await TournamentStageRepository.update_stage(session, stage_id, {"status": "in_progress"})
-    await TournamentRepository.update(session, tournament_id, {"status": "in_progress"})
-    await session.commit()
+    mid_list = await TournamentService.reset_stage_data(session, tournament_id, stage_id)
 
     # Same invalidation set as delete_match, but for every match we just wiped.
     from src.database.redis.match_cache import MatchCache
     for mid in mid_list:
         await MatchCache.invalidate_match(mid)
     await LeaderboardCache.invalidate_tournament(tournament_id)
+    from src.database.redis.match_cache import MatchCache as _MC
+    await _MC.set_generic(f"leaderboard:{tournament_id}", None)
     from src.utils.cache import invalidate
     await invalidate(f"tournament:{tournament_id}")
     await MatchCache.set_generic(f"standings:{tournament_id}", None, ttl=1)

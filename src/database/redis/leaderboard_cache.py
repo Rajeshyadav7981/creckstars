@@ -143,7 +143,9 @@ class LeaderboardCache:
         """Clear all leaderboard data for a tournament."""
         try:
             r = await LeaderboardCache._get_redis()
-            keys = await r.keys(f"lb:*:{tournament_id}")
+            keys = []
+            async for k in r.scan_iter(match=f"lb:*:{tournament_id}", count=200):
+                keys.append(k)
             if keys:
                 await r.delete(*keys)
         except Exception as e:

@@ -46,8 +46,16 @@ ROUND_CATALOG: List[RoundDef] = [
         name="round_of_16",
         label="Round of 16",
         kind="knockout",
-        min_teams=16,
+        min_teams=9,
         max_teams=16,
+        pair_strategy="cross_seed",
+    ),
+    RoundDef(
+        name="preliminary_round",
+        label="Preliminary Round",
+        kind="knockout",
+        min_teams=3,
+        max_teams=None,
         pair_strategy="cross_seed",
     ),
     RoundDef(

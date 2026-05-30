@@ -58,7 +58,9 @@ async def invalidate_pattern(pattern: str):
     try:
         r = await redis_client.get_client()
         if r:
-            keys = await r.keys(f"{CACHE_PREFIX}{pattern}")
+            keys = []
+            async for k in r.scan_iter(match=f"{CACHE_PREFIX}{pattern}", count=200):
+                keys.append(k)
             if keys:
                 await r.delete(*keys)
     except Exception:

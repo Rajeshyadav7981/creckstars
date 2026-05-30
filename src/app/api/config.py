@@ -34,8 +34,17 @@ REFRESH_TOKEN_EXPIRE_MINUTES = _env_int("REFRESH_TOKEN_EXPIRE_MINUTES", 10080)
 OTP_EXPIRE_MINUTES = _env_int("OTP_EXPIRE_MINUTES", 5)
 OTP_MAX_ATTEMPTS = _env_int("OTP_MAX_ATTEMPTS", 5)        # lockout after N wrong guesses
 OTP_LOCKOUT_MINUTES = _env_int("OTP_LOCKOUT_MINUTES", 15)
-SMS_API_KEY = _env("SMS_API_KEY")
-SMS_TEMPLATE_ID = _env("SMS_TEMPLATE_ID")
+# OTP delivery: Message Central VerifyNow (https://cpaas.messagecentral.com) —
+# managed verification API, no DLT, provider owns the code + template.
+# customerId + password come from the Message Central dashboard.
+MC_BASE_URL = _env("MC_BASE_URL", "https://cpaas.messagecentral.com").rstrip("/")
+MC_CUSTOMER_ID = _env("MC_CUSTOMER_ID")
+MC_PASSWORD = _env("MC_PASSWORD")          # plain password; we base64-encode for the token call
+MC_COUNTRY_CODE = _env("MC_COUNTRY_CODE", "91")
+MC_FLOW_TYPE = _env("MC_FLOW_TYPE", "SMS").strip().upper()  # SMS | WHATSAPP
+
+# ── Image storage (local VM disk; served by the /uploads StaticFiles mount) ──
+UPLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "uploads")
 
 # Temporary dev-mode switch: while DLT approval for SMS OTP is pending, accept
 # any 6-digit numeric code as valid. Defaults ON for non-production so the

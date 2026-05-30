@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 
 
 class ScoreDeliveryRequest(BaseModel):
-    batsman_runs: int = Field(0, ge=0, le=7)
+    batsman_runs: int = Field(0, ge=0, le=19)
     is_boundary: bool = False
     is_six: bool = False
     extra_type: str | None = Field(None, pattern="^(wide|noball|bye|legbye)$")

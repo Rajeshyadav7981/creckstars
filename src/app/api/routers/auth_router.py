@@ -36,12 +36,19 @@ async def register(
     data: RegisterRequest,
     session: AsyncSession = Depends(get_async_db),
 ):
-    """Register user. OTP must be verified before calling this endpoint."""
-    return await AuthService.register(
+    """Register user. Requires a server-verified OTP for the mobile (the
+    /verify-otp call stamps the flag this gate consumes)."""
+    mobile = data.mobile.strip()
+    if not await _otp_is_verified(mobile, "register"):
+        raise HTTPException(
+            status_code=403,
+            detail="Please verify your mobile number with the OTP before registering.",
+        )
+    result = await AuthService.register(
         session=session,
         first_name=data.first_name,
         last_name=data.last_name,
-        mobile=data.mobile,
+        mobile=mobile,
         email=data.email,
         password=data.password,
         profile=data.profile,
@@ -55,6 +62,10 @@ async def register(
         bowling_style=data.bowling_style,
         player_role=data.player_role,
     )
+    # Consume the gate only after a successful create, so a failed attempt
+    # (e.g. duplicate email) can be retried without re-verifying the OTP.
+    await _otp_clear_verified(mobile, "register")
+    return result
 
 
 @router.post("/login")
@@ -156,31 +167,35 @@ async def upload_profile_photo(
 
     # Re-encode to ≤ 2 MB. Avatar is a 1024-wide square; the compressor will
     # step quality down and shrink if a high-res upload still overruns.
+    import asyncio as _asyncio
     from src.utils.image_compress import compress_to_target_size
-    content = compress_to_target_size(img, target_bytes=2 * 1024 * 1024, max_width=1024)
+    content = await _asyncio.to_thread(compress_to_target_size, img, 2 * 1024 * 1024, 1024)
 
     # Save file — filename is server-generated only; no user input on disk.
-    profiles_dir = os.path.join(UPLOADS_DIR, "profiles")
-    os.makedirs(profiles_dir, exist_ok=True)
+    # Persist to local disk via the shared storage helper; returns '/uploads/...'.
+    from src.services.storage_service import save_image
     filename = f"{current_user.id}_{uuid.uuid4().hex}.jpg"
-    filepath = os.path.join(profiles_dir, filename)
-    # Defence in depth: ensure the resolved path is still inside profiles_dir.
-    resolved = os.path.realpath(filepath)
-    if not resolved.startswith(os.path.realpath(profiles_dir) + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid upload path.")
-    with open(filepath, "wb") as f:
-        f.write(content)
-
-    # Update user profile field with relative URL
-    profile_url = f"/uploads/profiles/{filename}"
+    profile_url = await save_image(content, "profiles", filename)
     await UserRepository.update_user(session, current_user.id, {"profile": profile_url})
 
-    # Invalidate Redis user cache so stale photo URL is not served
     try:
         from src.database.redis.redis_client import redis_client
         r = await redis_client.get_client()
         if r:
-            await r.delete(f"user:{current_user.id}")
+            keys = [f"user:{current_user.id}"]
+            uname = (current_user.username or "").lower()
+            if uname:
+                keys.append(f"profile:{uname}")
+            from sqlalchemy import select as _select
+            from src.database.postgres.schemas.player_schema import PlayerSchema as _PS
+            pres = await session.execute(_select(_PS.id).where(_PS.user_id == current_user.id))
+            for (pid,) in pres.all():
+                keys.append(f"cache:player_stats:{pid}")
+            await r.delete(*keys)
+            async for k in r.scan_iter(match="usearch:v2:*", count=200):
+                await r.delete(k)
+            async for k in r.scan_iter(match="mention:*", count=200):
+                await r.delete(k)
     except Exception as _e:
         logger.warning(
             "User cache invalidate failed after avatar upload",
@@ -268,6 +283,44 @@ async def _otp_clear_failures(mobile: str, purpose: str):
         return
 
 
+# ── Server-side "OTP verified" gate ──────────────────────────────────────
+# /verify-otp only proves verification to the *client*. Without a server-side
+# record a client could skip it and POST /register directly for any mobile it
+# doesn't own. On a successful verify we stamp a short-TTL Redis flag that
+# /register requires (and clears only on a successful create).
+
+async def _otp_mark_verified(mobile: str, purpose: str):
+    from src.database.redis.redis_client import redis_client
+    try:
+        r = await redis_client.get_client()
+        if r:
+            await r.set(f"otp_verified:{mobile}:{purpose}", "1", ex=600)  # 10 min
+    except Exception:
+        return
+
+
+async def _otp_is_verified(mobile: str, purpose: str) -> bool:
+    """Fail closed: absent flag (or unreachable Redis) denies the gate."""
+    from src.database.redis.redis_client import redis_client
+    try:
+        r = await redis_client.get_client()
+        if not r:
+            return False
+        return bool(await r.get(f"otp_verified:{mobile}:{purpose}"))
+    except Exception:
+        return False
+
+
+async def _otp_clear_verified(mobile: str, purpose: str):
+    from src.database.redis.redis_client import redis_client
+    try:
+        r = await redis_client.get_client()
+        if r:
+            await r.delete(f"otp_verified:{mobile}:{purpose}")
+    except Exception:
+        return
+
+
 @router.post("/send-otp")
 @limiter.limit(RATE_LIMITS["send_otp"])
 async def send_otp(
@@ -275,11 +328,12 @@ async def send_otp(
     data: SendOTPRequest,
     session: AsyncSession = Depends(get_async_db),
 ):
-    """Send OTP to mobile number."""
-    from datetime import datetime, timedelta, timezone
-    from src.database.postgres.repositories.otp_repository import OTPRepository
-    from src.utils.security import generate_otp
-    from src.app.api.config import OTP_EXPIRE_MINUTES
+    """Send an OTP via Message Central VerifyNow.
+
+    VerifyNow generates + delivers the code and we only stash the returned
+    verificationId (in Redis, keyed by mobile+purpose). No code is stored locally.
+    """
+    from src.services.verifynow_service import VerifyNowService, VerifyNowError
 
     mobile = data.mobile.strip()
     if len(mobile) != 10 or not mobile.isdigit():
@@ -288,98 +342,39 @@ async def send_otp(
     # Don't let a locked-out account re-arm itself by requesting a new OTP.
     await _otp_lockout_check(mobile, data.purpose)
 
-    # For password reset, the mobile must already be registered
+    # For password reset, the mobile must already be registered.
     if data.purpose == "reset_password":
         existing = await UserRepository.get_by_mobile(session, mobile)
         if not existing:
             raise HTTPException(status_code=404, detail="No account found with this mobile number")
 
-    otp_code = generate_otp()
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRE_MINUTES)
-
-    await OTPRepository.create_otp(session, {
-        "mobile": mobile,
-        "otp_code": otp_code,
-        "purpose": data.purpose,
-        "expires_at": expires_at,
-    })
-
-    # Send OTP via MSG91
-    from src.app.api.config import SMS_API_KEY, SMS_TEMPLATE_ID, ENVIRONMENT
-    import httpx
-
-    if SMS_API_KEY:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(
-                    "https://control.msg91.com/api/v5/otp",
-                    headers={
-                        "authkey": SMS_API_KEY,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "mobile": f"91{mobile}",
-                        "otp": otp_code,
-                        "otp_length": 6,
-                        "otp_expiry": OTP_EXPIRE_MINUTES,
-                        "template_id": SMS_TEMPLATE_ID,
-                    },
-                )
-                # MSG91 returns 200 even on logical errors; the body's `type`
-                # field is the real signal. Log the full body on non-success
-                # so DLT/template/sender-id rejections (e.g. error code 204)
-                # can be diagnosed without guessing.
-                try:
-                    result = resp.json()
-                except ValueError:
-                    result = {"type": "error", "message": resp.text[:300]}
-                if result.get("type") == "error" or resp.status_code >= 400:
-                    logger.warning(
-                        "MSG91 rejected OTP send",
-                        extra={"extra_data": {
-                            "mobile": _mask_mobile(mobile),
-                            "http_status": resp.status_code,
-                            "msg91_type": result.get("type"),
-                            "msg91_code": result.get("code"),
-                            "msg91_message": result.get("message"),
-                            "msg91_request_id": result.get("request_id"),
-                            "template_id_tail": (SMS_TEMPLATE_ID or "")[-6:],
-                        }},
-                    )
-                    raise HTTPException(status_code=500, detail="SMS service could not send. Try again.")
-                if result.get("type") != "success":
-                    logger.warning(
-                        "MSG91 unexpected response",
-                        extra={"extra_data": {
-                            "mobile": _mask_mobile(mobile),
-                            "msg91_type": result.get("type"),
-                            "msg91_message": result.get("message"),
-                            "msg91_request_id": result.get("request_id"),
-                        }},
-                    )
-                logger.info(
-                    "OTP dispatched",
-                    extra={"extra_data": {
-                        "mobile": _mask_mobile(mobile),
-                        "purpose": data.purpose,
-                        "msg91_request_id": result.get("request_id"),
-                    }},
-                )
-        except httpx.HTTPError as e:
-            logger.error(
-                "MSG91 request failed",
-                extra={"extra_data": {"mobile": _mask_mobile(mobile), "error": str(e)}},
+    try:
+        _vid, timeout = await VerifyNowService.send(mobile, data.purpose)
+    except VerifyNowError as e:
+        if getattr(e, "response_code", None) == "506":
+            # An OTP is still active for this number on VerifyNow's side.
+            raise HTTPException(
+                status_code=429,
+                detail="A code was already sent. Please wait for it to expire before requesting a new one.",
             )
-            raise HTTPException(status_code=500, detail="SMS service unavailable. Try again.")
-
-    # Dev-only: log OTP code for local testing. Never in production; never full mobile.
-    if ENVIRONMENT.lower() not in ("production", "prod"):
-        logger.info(
-            "Dev OTP generated",
-            extra={"extra_data": {"mobile": _mask_mobile(mobile), "otp": otp_code, "purpose": data.purpose}},
+        logger.error(
+            "VerifyNow send failed",
+            extra={"extra_data": {"mobile": _mask_mobile(mobile), "error": str(e)}},
         )
+        raise HTTPException(status_code=500, detail="OTP service unavailable. Try again.")
+    except Exception as e:
+        logger.error(
+            "VerifyNow send failed",
+            extra={"extra_data": {"mobile": _mask_mobile(mobile), "error": str(e)}},
+        )
+        raise HTTPException(status_code=500, detail="OTP service unavailable. Try again.")
 
-    return {"message": "OTP sent", "expires_in": OTP_EXPIRE_MINUTES * 60}
+    logger.info(
+        "OTP dispatched (VerifyNow)",
+        extra={"extra_data": {"mobile": _mask_mobile(mobile), "purpose": data.purpose, "expires_in": timeout}},
+    )
+    # Hand the UI VerifyNow's real validity window so the countdown is accurate.
+    return {"message": "OTP sent", "expires_in": timeout}
 
 
 @router.post("/verify-otp")
@@ -387,49 +382,29 @@ async def send_otp(
 async def verify_otp(
     request: Request,
     data: VerifyOTPRequest,
-    session: AsyncSession = Depends(get_async_db),
 ):
-    """Verify OTP code. Enforces per-mobile lockout after repeated wrong guesses."""
-    from datetime import datetime, timezone
-    from src.database.postgres.repositories.otp_repository import OTPRepository
+    """Verify an OTP via VerifyNow. Enforces per-mobile lockout after repeated wrong guesses."""
+    from src.services.verifynow_service import VerifyNowService
 
     mobile = data.mobile.strip()
     otp_input = data.otp.strip()
 
-    # DLT-pending dev bypass: accept any 6-digit numeric OTP. Flip
-    # OTP_BYPASS_ENABLED=false once real SMS delivery is wired up.
+    # Dev-only bypass: accept any 6-digit code without hitting the provider.
+    # config.validate_config() refuses to boot with this enabled in production.
     if OTP_BYPASS_ENABLED and len(otp_input) == 6 and otp_input.isdigit():
         logger.warning(f"[OTP BYPASS] accepting dummy OTP for {mobile} (purpose={data.purpose})")
         await _otp_clear_failures(mobile, data.purpose)
-        existing = await OTPRepository.get_latest_otp(session, mobile, data.purpose)
-        if existing and not existing.is_verified:
-            await OTPRepository.mark_verified(session, existing.id)
+        await _otp_mark_verified(mobile, data.purpose)
         return {"verified": True}
 
     await _otp_lockout_check(mobile, data.purpose)
 
-    otp_record = await OTPRepository.get_latest_otp(session, mobile, data.purpose)
-
-    if not otp_record:
-        raise HTTPException(status_code=400, detail="No OTP found. Request a new one.")
-
-    if otp_record.is_verified:
-        raise HTTPException(status_code=400, detail="OTP already used")
-
-    if otp_record.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="OTP expired. Request a new one.")
-
-    # Constant-time compare to avoid timing leaks
-    import secrets as _secrets
-    if not _secrets.compare_digest(otp_record.otp_code, data.otp.strip()):
-        await _otp_record_failure(mobile, data.purpose)
-        # Delete the record so the code can't be re-guessed after rotation.
-        await OTPRepository.delete_otp(session, otp_record.id)
-        raise HTTPException(status_code=400, detail="Invalid OTP")
-
-    await OTPRepository.mark_verified(session, otp_record.id)
-    await _otp_clear_failures(mobile, data.purpose)
-    return {"verified": True}
+    if await VerifyNowService.validate(mobile, data.purpose, otp_input):
+        await _otp_clear_failures(mobile, data.purpose)
+        await _otp_mark_verified(mobile, data.purpose)
+        return {"verified": True}
+    await _otp_record_failure(mobile, data.purpose)
+    raise HTTPException(status_code=400, detail="Invalid OTP")
 
 
 @router.post("/reset-password")
@@ -442,10 +417,8 @@ async def reset_password(
     """Reset password after OTP verification.
     Flow: user calls /send-otp with purpose='reset_password' → enters OTP + new password here.
     """
-    from datetime import datetime, timezone
-    import secrets as _secrets
-    from src.database.postgres.repositories.otp_repository import OTPRepository
     from src.utils.security import hash_password
+    from src.services.verifynow_service import VerifyNowService
 
     mobile = data.mobile.strip()
     new_password = data.new_password
@@ -468,25 +441,11 @@ async def reset_password(
     if bypass:
         logger.warning(f"[OTP BYPASS] accepting dummy OTP for reset_password {mobile}")
         await _otp_clear_failures(mobile, "reset_password")
-        existing = await OTPRepository.get_latest_otp(session, mobile, "reset_password")
-        if existing and not existing.is_verified:
-            await OTPRepository.mark_verified(session, existing.id)
     else:
         await _otp_lockout_check(mobile, "reset_password")
-        # Validate the reset OTP (same logic as verify-otp, with attempt tracking)
-        otp_record = await OTPRepository.get_latest_otp(session, mobile, "reset_password")
-        if not otp_record:
-            raise HTTPException(status_code=400, detail="No OTP found. Request a new one.")
-        if otp_record.is_verified:
-            raise HTTPException(status_code=400, detail="OTP already used. Request a new one.")
-        if otp_record.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-            raise HTTPException(status_code=400, detail="OTP expired. Request a new one.")
-        if not _secrets.compare_digest(otp_record.otp_code, otp_input):
+        if not await VerifyNowService.validate(mobile, "reset_password", otp_input):
             await _otp_record_failure(mobile, "reset_password")
-            await OTPRepository.delete_otp(session, otp_record.id)
             raise HTTPException(status_code=400, detail="Invalid OTP")
-        # Mark OTP used and clear lockout counter
-        await OTPRepository.mark_verified(session, otp_record.id)
         await _otp_clear_failures(mobile, "reset_password")
 
     # Update password

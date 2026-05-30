@@ -53,7 +53,7 @@ class MatchRepository:
 
     # Columns loaded for every match list/detail view
     _LIST_COLS = [
-        MatchSchema.id, MatchSchema.match_code, MatchSchema.status,
+        MatchSchema.id, MatchSchema.match_code, MatchSchema.name, MatchSchema.status,
         MatchSchema.team_a_id, MatchSchema.team_b_id,
         MatchSchema.overs, MatchSchema.tournament_id,
         MatchSchema.match_date, MatchSchema.result_summary,
@@ -61,6 +61,7 @@ class MatchRepository:
         MatchSchema.match_type, MatchSchema.time_slot,
         MatchSchema.stage_id, MatchSchema.group_id, MatchSchema.match_number,
         MatchSchema.venue_id, MatchSchema.current_innings, MatchSchema.created_at,
+        MatchSchema.toss_winner_id, MatchSchema.toss_decision,
     ]
 
     @staticmethod
@@ -121,7 +122,8 @@ class MatchRepository:
                 team_a = select(TS.id).where(TS.name.ilike(f"%{search}%"), TS.id == MatchSchema.team_a_id).correlate(MatchSchema).exists()
                 team_b = select(TS.id).where(TS.name.ilike(f"%{search}%"), TS.id == MatchSchema.team_b_id).correlate(MatchSchema).exists()
                 code_match = MatchSchema.match_code.ilike(f"%{search}%")
-                query = query.where(or_(team_a, team_b, code_match))
+                name_match = MatchSchema.name.ilike(f"%{search}%")
+                query = query.where(or_(team_a, team_b, code_match, name_match))
             query = query.order_by(MatchSchema.created_at.desc()).limit(limit).offset(offset)
             result = await session.execute(query)
             matches = []
@@ -144,7 +146,8 @@ class MatchRepository:
             team_a = select(TS.id).where(TS.name.ilike(f"%{search}%"), TS.id == MatchSchema.team_a_id).correlate(MatchSchema).exists()
             team_b = select(TS.id).where(TS.name.ilike(f"%{search}%"), TS.id == MatchSchema.team_b_id).correlate(MatchSchema).exists()
             code_match = MatchSchema.match_code.ilike(f"%{search}%")
-            query = query.where(or_(team_a, team_b, code_match))
+            name_match = MatchSchema.name.ilike(f"%{search}%")
+            query = query.where(or_(team_a, team_b, code_match, name_match))
         query = query.order_by(MatchSchema.created_at.desc()).limit(limit).offset(offset)
         result = await session.execute(query)
         return result.scalars().all()

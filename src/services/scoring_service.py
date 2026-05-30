@@ -6,6 +6,7 @@ from src.database.postgres.schemas.player_schema import PlayerSchema
 from src.database.postgres.schemas.team_schema import TeamSchema
 from src.database.postgres.schemas.innings_schema import InningsSchema
 from src.database.postgres.schemas.match_schema import MatchSchema
+from src.database.postgres.schemas.batting_scorecard_schema import BattingScorecardSchema
 from src.database.postgres.repositories.innings_repository import InningsRepository
 from src.database.postgres.repositories.delivery_repository import DeliveryRepository
 from src.database.postgres.repositories.scorecard_repository import ScorecardRepository
@@ -556,26 +557,36 @@ class ScoringService:
 
     @staticmethod
     async def end_innings(session: AsyncSession, match_id: int):
-        match = await MatchRepository.get_by_id(session, match_id)
+        match_res = await session.execute(
+            select(MatchSchema).where(MatchSchema.id == match_id).with_for_update()
+        )
+        match = match_res.scalar_one_or_none()
         if not match or match.status != "live":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
 
-        # Find the current active innings
         current_inn = match.current_innings
-        if not current_inn:
-            # Find the latest non-completed innings
+        if current_inn:
+            inn_res = await session.execute(
+                select(InningsSchema)
+                .where(
+                    InningsSchema.match_id == match_id,
+                    InningsSchema.innings_number == current_inn,
+                )
+                .with_for_update()
+            )
+            innings = inn_res.scalar_one_or_none()
+            if innings is None:
+                return {"message": "No innings found", "total_runs": 0}
+        else:
             all_innings = await InningsRepository.get_by_match(session, match_id)
             active = [i for i in all_innings if i.status != "completed"]
             if not active:
                 return {"message": "All innings already completed", "total_runs": 0}
-            innings = active[0]
-        else:
-            innings_list = await InningsRepository.get_by_match(session, match_id, current_inn)
-            if not innings_list:
-                return {"message": "No innings found", "total_runs": 0}
-            innings = innings_list[0]
+            lock_res = await session.execute(
+                select(InningsSchema).where(InningsSchema.id == active[0].id).with_for_update()
+            )
+            innings = lock_res.scalar_one_or_none() or active[0]
 
-        # Skip if already completed
         if innings.status == "completed":
             return {"message": f"Innings {innings.innings_number} already completed", "total_runs": innings.total_runs}
 
@@ -603,7 +614,10 @@ class ScoringService:
 
     @staticmethod
     async def end_match(session: AsyncSession, match_id: int, force_tie: bool = False):
-        match = await MatchRepository.get_by_id(session, match_id)
+        match_res = await session.execute(
+            select(MatchSchema).where(MatchSchema.id == match_id).with_for_update()
+        )
+        match = match_res.scalar_one_or_none()
         if not match:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
 
@@ -687,6 +701,76 @@ class ScoringService:
         return result
 
     @staticmethod
+    async def declare_innings(session: AsyncSession, match_id: int):
+        """Voluntarily close the current innings (cricket declaration).
+
+        Same teardown as end_innings — strikers marked not-out, innings status
+        set to completed, target computed for the chasing side — but flips
+        innings.declared=true so the scorecard can label it 'declared'.
+        """
+        match_res = await session.execute(
+            select(MatchSchema).where(MatchSchema.id == match_id).with_for_update()
+        )
+        match = match_res.scalar_one_or_none()
+        if not match or match.status != "live":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
+
+        current_inn = match.current_innings
+        if current_inn and current_inn > 2:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail="Cannot declare a super-over innings")
+
+        inn_res = await session.execute(
+            select(InningsSchema)
+            .where(
+                InningsSchema.match_id == match_id,
+                InningsSchema.innings_number == current_inn,
+            )
+            .with_for_update()
+        ) if current_inn else None
+        innings = inn_res.scalar_one_or_none() if inn_res is not None else None
+        if innings is None:
+            all_innings = await InningsRepository.get_by_match(session, match_id)
+            active = [i for i in all_innings if i.status != "completed"]
+            if not active:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail="No active innings to declare")
+            lock_res = await session.execute(
+                select(InningsSchema).where(InningsSchema.id == active[0].id).with_for_update()
+            )
+            innings = lock_res.scalar_one_or_none() or active[0]
+
+        if innings.status == "completed":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"Innings {innings.innings_number} already completed")
+
+        batting_cards = await ScorecardRepository.get_batting_by_innings(session, innings.id)
+        for card in batting_cards:
+            if not card.is_out and card.how_out is None:
+                card.how_out = "not out"
+        await session.flush()
+
+        await InningsRepository.update(session, innings.id, {
+            "status": "completed",
+            "declared": True,
+        })
+        await session.commit()
+
+        logger.info(f"Innings declared: match={match_id} innings={innings.innings_number} runs={innings.total_runs}")
+
+        result = {
+            "message": f"Innings {innings.innings_number} declared",
+            "total_runs": innings.total_runs,
+            "total_wickets": innings.total_wickets,
+            "declared": True,
+        }
+        fire_and_forget(
+            ws_manager.broadcast(match_id, {"type": "innings_end", "data": {**result, "declared": True}}),
+            name=f"ws_innings_declared_match_{match_id}",
+        )
+        return result
+
+    @staticmethod
     async def swap_batters(session: AsyncSession, match_id: int):
         """Manually swap striker and non-striker. Not a cricket rule — admin option."""
         match_res = await session.execute(
@@ -718,3 +802,91 @@ class ScoringService:
             name=f"ws_swap_match_{match_id}",
         )
         return {"message": "Batters swapped"}
+
+    @staticmethod
+    async def retire_hurt(session: AsyncSession, match_id: int, retired_player_id: int, new_batsman_id: int):
+        """Retire an injured batsman and bring a new one in. NOT a wicket: total_wickets
+        is unchanged, no delivery row is created, no fall_of_wicket row is recorded.
+        The retired batsman's scorecard is marked `how_out = 'retired hurt'` with
+        `is_out = False` so a returning batter can be handled later if needed."""
+        match_res = await session.execute(
+            select(MatchSchema).where(MatchSchema.id == match_id).with_for_update()
+        )
+        match = match_res.scalar_one_or_none()
+        if not match or match.status != "live":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Match not live")
+
+        result = await session.execute(
+            select(InningsSchema)
+            .where(InningsSchema.match_id == match_id, InningsSchema.innings_number == match.current_innings)
+            .with_for_update()
+        )
+        innings = result.scalar_one_or_none()
+        if not innings or innings.status != "in_progress":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Innings not in progress")
+
+        if retired_player_id not in (innings.current_striker_id, innings.current_non_striker_id):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Retired player must be one of the current batsmen")
+        if new_batsman_id == innings.current_striker_id or new_batsman_id == innings.current_non_striker_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Replacement is already batting")
+
+        batting_squad = await MatchRepository.get_squad(session, match_id, innings.batting_team_id)
+        squad_ids = [p.id for p, _ in batting_squad] if batting_squad else []
+        if squad_ids and new_batsman_id not in squad_ids:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Replacement batter is not in the squad")
+
+        existing_card = (await session.execute(
+            select(BattingScorecardSchema).where(
+                BattingScorecardSchema.innings_id == innings.id,
+                BattingScorecardSchema.player_id == new_batsman_id,
+            )
+        )).scalar_one_or_none()
+        if existing_card is not None and existing_card.is_out:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Replacement batter has already been dismissed in this innings")
+
+        retired_card = await ScorecardRepository.get_or_create_batting(session, innings.id, retired_player_id)
+        retired_card.how_out = "retired hurt"
+        retired_card.is_out = False
+        await session.flush()
+
+        active_partnership = await ScorecardRepository.get_active_partnership(session, innings.id)
+        if active_partnership:
+            active_partnership.is_active = False
+            await session.flush()
+
+        striker_was_retired = innings.current_striker_id == retired_player_id
+        new_striker_id = new_batsman_id if striker_was_retired else innings.current_striker_id
+        new_non_striker_id = innings.current_non_striker_id if striker_was_retired else new_batsman_id
+
+        await InningsRepository.update(session, innings.id, {
+            "current_striker_id": new_striker_id,
+            "current_non_striker_id": new_non_striker_id,
+        })
+
+        position = (innings.total_wickets or 0) + 3
+        replacement_card = await ScorecardRepository.get_or_create_batting(session, innings.id, new_batsman_id, position=position)
+        if replacement_card.how_out:
+            replacement_card.how_out = None
+            replacement_card.is_out = False
+            await session.flush()
+
+        wicket_number_for_partnership = innings.total_wickets or 0
+        await ScorecardRepository.get_or_create_partnership(
+            session, innings.id, wicket_number_for_partnership, new_striker_id, new_non_striker_id,
+        )
+
+        await session.commit()
+
+        fire_and_forget(
+            ws_manager.broadcast(match_id, {"type": "delivery", "data": {
+                "retired_hurt": True,
+                "retired_player_id": retired_player_id,
+                "new_batsman_id": new_batsman_id,
+            }}),
+            name=f"ws_retired_hurt_match_{match_id}",
+        )
+        return {
+            "message": "Batter retired hurt",
+            "retired_player_id": retired_player_id,
+            "new_batsman_id": new_batsman_id,
+        }

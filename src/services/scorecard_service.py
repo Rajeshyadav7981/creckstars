@@ -172,6 +172,7 @@ class ScorecardService:
                 "batting_team_name": team_name_map.get(inn.batting_team_id, ""),
                 "bowling_team_name": team_name_map.get(inn.bowling_team_id, ""),
                 "is_super_over": inn.innings_number > 2,
+                "declared": bool(getattr(inn, "declared", False)),
                 "total_runs": inn.total_runs,
                 "total_wickets": inn.total_wickets,
                 "total_overs": inn.total_overs,

@@ -15,6 +15,7 @@ class InningsSchema(Base):
     total_overs = Column(Float, default=0.0)
     total_extras = Column(Integer, default=0)
     status = Column(String(20), default="not_started")  # not_started, in_progress, completed
+    declared = Column(Boolean, nullable=False, server_default="false", default=False)
     target = Column(Integer, nullable=True)
     current_over = Column(Integer, default=0)
     current_ball = Column(Integer, default=0)

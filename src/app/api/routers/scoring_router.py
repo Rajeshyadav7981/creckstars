@@ -58,30 +58,28 @@ async def _refresh_cache(session, match_id: int):
                 except Exception as _e:
                     logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
 
-            # Invalidate stats cache for match creator + all squad members
-            # (played/created completed counts changed). Also invalidate per-player
-            # career stats cache so PlayerProfile reflects the new innings/spell.
             try:
-                from src.app.api.routers.user_router import invalidate_user_stats
                 from src.database.postgres.schemas.match_squad_schema import MatchSquadSchema as _MSQ
                 from src.database.postgres.schemas.player_schema import PlayerSchema as _PS
+                from src.database.redis.redis_client import redis_client as _rc
                 from sqlalchemy import select as _sel
                 if match:
-                    await invalidate_user_stats(match.created_by)
                     res = await session.execute(
                         _sel(_MSQ.player_id, _PS.user_id)
                         .join(_PS, _PS.id == _MSQ.player_id)
                         .where(_MSQ.match_id == match_id)
                     )
-                    seen_uids = set()
-                    seen_pids = set()
+                    user_ids = {match.created_by} if match.created_by else set()
+                    player_ids = set()
                     for (pid, uid) in res.all():
-                        if uid and uid not in seen_uids:
-                            seen_uids.add(uid)
-                            await invalidate_user_stats(uid)
-                        if pid and pid not in seen_pids:
-                            seen_pids.add(pid)
-                            await MatchCache.set_generic(f"player_stats:{pid}", None, ttl=1)
+                        if uid:
+                            user_ids.add(uid)
+                        if pid:
+                            player_ids.add(pid)
+                    r = await _rc.get_client()
+                    if r and (user_ids or player_ids):
+                        keys = [f"stats:{uid}" for uid in user_ids] + [f"cache:player_stats:{pid}" for pid in player_ids]
+                        await r.delete(*keys)
             except Exception as _e:
                 logger.warning('Non-critical cache/invalidation failed', extra={'extra_data': {'error': str(_e)}})
     except Exception as e:
@@ -165,6 +163,21 @@ async def end_innings(
     return result
 
 
+@router.post("/{match_id}/declare-innings")
+@limiter.limit(RATE_LIMITS["end_innings"])
+@idempotent(ttl_seconds=600)
+async def declare_innings(
+    request: Request,
+    match_id: int,
+    session: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
+):
+    await _check_match_owner(session, match_id, user.id)
+    result = await ScoringService.declare_innings(session, match_id)
+    await _refresh_cache(session, match_id)
+    return result
+
+
 @router.post("/{match_id}/end-match")
 @limiter.limit(RATE_LIMITS["end_match"])
 async def end_match(
@@ -178,11 +191,18 @@ async def end_match(
     result = await ScoringService.end_match(session, match_id, force_tie=force_tie)
     if not result.get("is_tied"):
         await MatchCache.invalidate_match(match_id)
-        # Also wipe the matches-list cache for this user so the home tab
-        # immediately reflects the new "completed" status (no stale cards).
-        from src.utils.cache import invalidate_pattern
+        from src.utils.cache import invalidate_pattern, invalidate
         await invalidate_pattern(f"matches:u{match.created_by}:*")
         await invalidate_pattern(f"matches:u{user.id}:*")
+        if match.tournament_id:
+            await invalidate(f"tournament:{match.tournament_id}")
+            await MatchCache.set_generic(f"standings:{match.tournament_id}", None, ttl=1)
+            await MatchCache.set_generic(f"leaderboard:{match.tournament_id}", None, ttl=1)
+            try:
+                from src.database.redis.leaderboard_cache import LeaderboardCache
+                await LeaderboardCache.invalidate_tournament(match.tournament_id)
+            except Exception as _e:
+                logger.warning(f"leaderboard cache invalidate failed: {_e}")
     return result
 
 
@@ -194,6 +214,26 @@ async def swap_batters(
 ):
     await _check_match_owner(session, match_id, user.id)
     result = await ScoringService.swap_batters(session, match_id)
+    await _refresh_cache(session, match_id)
+    return result
+
+
+@router.post("/{match_id}/retired-hurt")
+@limiter.limit(RATE_LIMITS["end_over"])
+@idempotent(ttl_seconds=600)
+async def retired_hurt(
+    request: Request,
+    match_id: int,
+    body: dict,
+    session: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
+):
+    await _check_match_owner(session, match_id, user.id)
+    retired_player_id = body.get("retired_player_id")
+    new_batsman_id = body.get("new_batsman_id")
+    if not retired_player_id or not new_batsman_id:
+        raise HTTPException(status_code=400, detail="retired_player_id and new_batsman_id are required")
+    result = await ScoringService.retire_hurt(session, match_id, int(retired_player_id), int(new_batsman_id))
     await _refresh_cache(session, match_id)
     return result
 

@@ -72,6 +72,7 @@ class TeamService:
                 "first_name": player.first_name,
                 "last_name": player.last_name,
                 "full_name": player.full_name,
+                "profile_image": player.profile_image,
                 "role": player.role,
                 "jersey_number": tp.jersey_number,
                 "is_captain": tp.is_captain,

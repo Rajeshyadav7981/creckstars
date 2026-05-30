@@ -14,6 +14,8 @@
 
 -- ── Extensions (requires superuser) ──
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS cube;
+CREATE EXTENSION IF NOT EXISTS earthdistance;
 
 
 -- ═══════════════════════════════════════
@@ -97,6 +99,8 @@ CREATE TABLE IF NOT EXISTS venues (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_venues_geo ON venues (latitude, longitude) WHERE latitude IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_venues_earth ON venues USING GIST (ll_to_earth(latitude, longitude))
+    WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS players (
     id SERIAL PRIMARY KEY,
@@ -204,6 +208,7 @@ CREATE TABLE IF NOT EXISTS tournament_stages (
     id SERIAL PRIMARY KEY,
     tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
     stage_name VARCHAR(50) NOT NULL,
+    stage_label VARCHAR(80),
     stage_order INTEGER NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'upcoming',
     qualification_rule JSONB,

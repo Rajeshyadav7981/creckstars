@@ -76,10 +76,12 @@ class CommunityService:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()
             if r:
+                keys = []
                 for sort in ("hot", "new", "top"):
-                    sort_keys = await r.keys(f"cache:posts:{sort}:*")
-                    if sort_keys:
-                        await r.delete(*sort_keys)
+                    async for k in r.scan_iter(match=f"cache:posts:{sort}:*", count=200):
+                        keys.append(k)
+                if keys:
+                    await r.delete(*keys)
         except Exception as _e:
             pass  # logged below not to crash hot path
 
@@ -201,7 +203,7 @@ class CommunityService:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()
             if r:
-                keys = await r.keys(f"cache:comments:{post_id}:*")
+                keys = [k async for k in r.scan_iter(match=f"cache:comments:{post_id}:*", count=200)]
                 if keys:
                     await r.delete(*keys)
         except Exception as _e:
@@ -228,7 +230,7 @@ class CommunityService:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()
             if r:
-                keys = await r.keys(f"cache:comments:{post_id}:*")
+                keys = [k async for k in r.scan_iter(match=f"cache:comments:{post_id}:*", count=200)]
                 if keys:
                     await r.delete(*keys)
         except Exception as _e:
@@ -270,7 +272,7 @@ class CommunityService:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()
             if r:
-                keys = await r.keys(f"cache:comments:{post_id}:*")
+                keys = [k async for k in r.scan_iter(match=f"cache:comments:{post_id}:*", count=200)]
                 if keys:
                     await r.delete(*keys)
         except Exception as _e:

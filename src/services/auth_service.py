@@ -216,16 +216,25 @@ class AuthService:
                 detail="User not found",
             )
 
-        # Invalidate Redis user + profile caches so stale data is not served
         try:
             from src.database.redis.redis_client import redis_client
             r = await redis_client.get_client()
             if r:
-                await r.delete(f"user:{user_id}")
+                keys = [f"user:{user_id}"]
                 if user.username:
-                    await r.delete(f"profile:{user.username.lower()}")
-        except Exception as _e:
-            pass  # non-fatal; stale cache will expire on its own TTL
+                    keys.append(f"profile:{user.username.lower()}")
+                from sqlalchemy import select as _select
+                from src.database.postgres.schemas.player_schema import PlayerSchema as _PS
+                pres = await session.execute(_select(_PS.id).where(_PS.user_id == user_id))
+                for (pid,) in pres.all():
+                    keys.append(f"cache:player_stats:{pid}")
+                await r.delete(*keys)
+                async for k in r.scan_iter(match="usearch:v2:*", count=200):
+                    await r.delete(k)
+                async for k in r.scan_iter(match="mention:*", count=200):
+                    await r.delete(k)
+        except Exception:
+            pass
 
         # Return the ORM row and let response_model=UserResponse serialize it.
         # A hand-built dict here used to silently drop followers_count /

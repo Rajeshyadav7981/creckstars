@@ -20,7 +20,6 @@ UPLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.pa
 
 # Import schemas so they are registered with Base
 import src.database.postgres.schemas.user_schema  # noqa
-import src.database.postgres.schemas.otp_schema  # noqa
 import src.database.postgres.schemas.team_schema  # noqa
 import src.database.postgres.schemas.player_schema  # noqa
 import src.database.postgres.schemas.team_player_schema  # noqa
@@ -90,6 +89,44 @@ class RequestTracingMiddleware:
             await self.app(scope, receive, send_with_request_id)
         finally:
             request_id_var.reset(token)
+
+
+class SlowRequestMiddleware:
+    """Logs requests slower than SLOW_REQUEST_MS so weekend degradation surfaces early."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+        import os, time
+        self._time = time
+        self._threshold_ms = int(os.getenv("SLOW_REQUEST_MS", "250"))
+        self._logger = get_logger("slow_request")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        start = self._time.perf_counter()
+        status_holder = {"code": 0}
+
+        async def send_capturing(message):
+            if message["type"] == "http.response.start":
+                status_holder["code"] = message.get("status", 0)
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_capturing)
+        finally:
+            dur_ms = (self._time.perf_counter() - start) * 1000.0
+            if dur_ms >= self._threshold_ms:
+                self._logger.warning(
+                    "slow_request",
+                    extra={"extra_data": {
+                        "method": scope.get("method"),
+                        "path": scope.get("path"),
+                        "status": status_holder["code"],
+                        "duration_ms": round(dur_ms, 1),
+                    }},
+                )
 
 
 class CORSMiddleware:
@@ -164,6 +201,12 @@ async def lifespan(app: FastAPI):
         _startup_logger.info("Background tasks drained")
     except Exception as e:
         _startup_logger.warning(f"Background task drain failed: {e}")
+    try:
+        from src.utils.http_client import close_http_client
+        await close_http_client()
+        _startup_logger.info("HTTP client closed")
+    except Exception as e:
+        _startup_logger.warning(f"HTTP client close failed: {e}")
     if _notif_started:
         try:
             from src.services.notification_service import notification_worker
@@ -224,6 +267,9 @@ app.add_middleware(CORSMiddleware)
 # Request tracing — adds X-Request-ID to every request/response for log correlation
 app.add_middleware(RequestTracingMiddleware)
 
+# Surface slow requests so weekend degradation is visible in logs
+app.add_middleware(SlowRequestMiddleware)
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
@@ -268,24 +314,9 @@ from src.app.api.config import APK_DIR
 os.makedirs(APK_DIR, exist_ok=True)
 
 
-@app.get("/.well-known/assetlinks.json")
-async def asset_links():
-    """Android App Links verification — required for deep link autoVerify."""
-    return [
-        {
-            "relation": ["delegate_permission/common.handle_all_urls"],
-            "target": {
-                "namespace": "android_app",
-                "package_name": "com.creckstars.app",
-                "sha256_cert_fingerprints": [
-                    # Replace with your actual signing key fingerprint after first EAS build:
-                    # Run: eas credentials --platform android
-                    # Then copy the SHA-256 fingerprint here
-                    "FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C"
-                ],
-            },
-        }
-    ]
+# NOTE: /.well-known/assetlinks.json is served by share_router (env-driven,
+# reads APP_SHA256_FINGERPRINT) which is registered first and wins. The old
+# hardcoded handler here was dead code with a stale fingerprint — removed.
 
 
 @app.get("/", response_class=HTMLResponse)

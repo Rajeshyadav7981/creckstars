@@ -1,10 +1,17 @@
+import os
 import httpx
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.repositories.venue_repository import VenueRepository
+from src.utils.logger import get_logger
+from src.utils.http_client import get_http_client
+
+logger = get_logger(__name__)
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org"
-NOMINATIM_HEADERS = {"User-Agent": "CrickStars/1.0"}
+NOMINATIM_HEADERS = {"User-Agent": "CrecKStars/1.0 (support@creckstars)"}
+# Bias results to India (the app is India-focused). Set "" for worldwide.
+NOMINATIM_COUNTRYCODES = os.getenv("NOMINATIM_COUNTRYCODES", "in")
 
 
 class VenueService:
@@ -41,18 +48,29 @@ class VenueService:
         return await VenueRepository.get_nearby(session, lat, lng, radius_km)
 
     @staticmethod
-    async def search_location(query: str, limit: int = 5):
-        """Proxy to OpenStreetMap Nominatim for location autocomplete."""
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{NOMINATIM_URL}/search",
-                params={"q": query, "format": "json", "limit": limit, "addressdetails": 1},
-                headers=NOMINATIM_HEADERS,
-                timeout=10,
+    async def search_location(query: str, limit: int = 8):
+        """Proxy to OpenStreetMap Nominatim for location autocomplete.
+
+        India-biased for relevance, and degrades to [] on any provider error
+        (Nominatim rate-limits at ~1 req/sec) so the autocomplete never hard-fails.
+        """
+        params = {
+            "q": query, "format": "json", "limit": limit,
+            "addressdetails": 1, "accept-language": "en",
+        }
+        if NOMINATIM_COUNTRYCODES:
+            params["countrycodes"] = NOMINATIM_COUNTRYCODES
+        try:
+            resp = await get_http_client().get(
+                f"{NOMINATIM_URL}/search", params=params,
+                headers=NOMINATIM_HEADERS, timeout=10,
             )
             resp.raise_for_status()
             results = resp.json()
-            return [
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("Nominatim search failed", extra={"extra_data": {"error": str(e)}})
+            return []
+        return [
                 {
                     "display_name": r.get("display_name"),
                     "latitude": float(r.get("lat", 0)),

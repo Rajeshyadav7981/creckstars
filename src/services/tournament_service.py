@@ -376,3 +376,66 @@ class TournamentService:
             "top_fielders": fielders_list[:20],
             "highest_scores": highest_scores[:20],
         }
+
+
+    @staticmethod
+    async def _delete_match_rows(session: AsyncSession, match_id: int) -> None:
+        from sqlalchemy import text
+        for stmt in (
+            "DELETE FROM fall_of_wickets WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)",
+            "DELETE FROM partnerships WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)",
+            "DELETE FROM overs WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)",
+            "DELETE FROM deliveries WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)",
+            "DELETE FROM batting_scorecards WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)",
+            "DELETE FROM bowling_scorecards WHERE innings_id IN (SELECT id FROM innings WHERE match_id = :mid)",
+            "DELETE FROM match_events WHERE match_id = :mid",
+            "DELETE FROM match_squads WHERE match_id = :mid",
+            "DELETE FROM match_subscriptions WHERE match_id = :mid",
+            "DELETE FROM innings WHERE match_id = :mid",
+            "DELETE FROM matches WHERE id = :mid",
+        ):
+            await session.execute(text(stmt), {"mid": match_id})
+
+    @staticmethod
+    async def delete_match_data(session: AsyncSession, match_id: int) -> None:
+        await TournamentService._delete_match_rows(session, match_id)
+        await session.commit()
+
+    @staticmethod
+    async def delete_stage_data(session: AsyncSession, tournament_id: int, stage_id: int) -> list[int]:
+        from sqlalchemy import text
+        from src.database.postgres.repositories.tournament_repository import TournamentRepository
+        res = await session.execute(
+            text("SELECT id FROM matches WHERE stage_id = :sid AND tournament_id = :tid"),
+            {"sid": stage_id, "tid": tournament_id},
+        )
+        mids = [r[0] for r in res.all()]
+        for mid in mids:
+            await TournamentService._delete_match_rows(session, mid)
+        await session.execute(
+            text("DELETE FROM tournament_group_teams WHERE group_id IN (SELECT id FROM tournament_groups WHERE stage_id = :sid)"),
+            {"sid": stage_id},
+        )
+        await session.execute(text("DELETE FROM tournament_groups WHERE stage_id = :sid"), {"sid": stage_id})
+        await session.execute(text("DELETE FROM tournament_stages WHERE id = :sid"), {"sid": stage_id})
+        await TournamentRepository.update(session, tournament_id, {"status": "in_progress"})
+        await session.commit()
+        return mids
+
+    @staticmethod
+    async def reset_stage_data(session: AsyncSession, tournament_id: int, stage_id: int) -> list[int]:
+        from sqlalchemy import text
+        from src.database.postgres.repositories.tournament_repository import TournamentRepository
+        from src.database.postgres.repositories.tournament_stage_repository import TournamentStageRepository
+        res = await session.execute(text("SELECT id FROM matches WHERE stage_id = :sid"), {"sid": stage_id})
+        mids = [r[0] for r in res.all()]
+        for mid in mids:
+            await TournamentService._delete_match_rows(session, mid)
+        await session.execute(
+            text("UPDATE tournament_group_teams SET qualification_status = NULL WHERE group_id IN (SELECT id FROM tournament_groups WHERE stage_id = :sid)"),
+            {"sid": stage_id},
+        )
+        await TournamentStageRepository.update_stage(session, stage_id, {"status": "in_progress"})
+        await TournamentRepository.update(session, tournament_id, {"status": "in_progress"})
+        await session.commit()
+        return mids

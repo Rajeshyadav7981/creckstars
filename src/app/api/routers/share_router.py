@@ -134,14 +134,21 @@ def _build_redirect_html(
     og_image: str = "",
 ) -> str:
     """Build an HTML page that opens the app or shows download/update page."""
+    # Escape all DB-derived values before they hit HTML / meta attributes —
+    # team & tournament names are user-controlled and would otherwise allow
+    # stored XSS on the public /share/* pages.
+    import html as _html
+    title = _html.escape(title or "")
+    description = _html.escape(description or "")
+    og_image = _html.escape(og_image or "", quote=True)
     intent_uri = (
         f"intent://{deep_link_path}"
         f"#Intent;scheme={APP_SCHEME};package={APP_PACKAGE_NAME};end"
     )
     scheme_uri = f"{APP_SCHEME}://{deep_link_path}"
     info = get_app_version_info()
-    version = info["latest_version"]
-    release_notes = info["release_notes"]
+    version = _html.escape(info["latest_version"] or "")
+    release_notes = _html.escape(info["release_notes"] or "")
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -445,14 +452,23 @@ async def share_player(request: Request, player_id: int):
 
 @router.get("/.well-known/assetlinks.json")
 async def assetlinks():
-    fingerprint = APP_SHA256_FINGERPRINT or "__ADD_YOUR_SHA256_FINGERPRINT__"
+    """Android App Links verification (Digital Asset Links).
+
+    APP_SHA256_FINGERPRINT may hold MULTIPLE comma-separated SHA-256 cert
+    fingerprints — list ALL keys that sign installs that should auto-open links:
+      • Play app-signing key  (Play Console → Setup → App integrity → App signing)
+      • Upload key            (`eas credentials --platform android`)
+    Listing both lets internal-test/upload-signed builds AND Play-signed installs
+    verify during the rollout window.
+    """
+    fingerprints = [f.strip() for f in (APP_SHA256_FINGERPRINT or "").split(",") if f.strip()]
     return JSONResponse(
         content=[{
             "relation": ["delegate_permission/common.handle_all_urls"],
             "target": {
                 "namespace": "android_app",
                 "package_name": APP_PACKAGE_NAME,
-                "sha256_cert_fingerprints": [fingerprint],
+                "sha256_cert_fingerprints": fingerprints,
             },
         }],
         headers={"Content-Type": "application/json"},

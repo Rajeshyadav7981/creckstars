@@ -13,6 +13,7 @@ class CreateMatchRequest(BaseModel):
     time_slot: str | None = Field(None, max_length=50)
     stage_id: int | None = None
     group_id: int | None = None
+    name: str | None = Field(None, max_length=200)
 
 
 class TossRequest(BaseModel):

@@ -33,6 +33,36 @@ async def app():
     return fastapi_app
 
 
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _close_pools_at_session_end():
+    yield
+    try:
+        from src.database.postgres.db import db
+        await db.async_engine.dispose()
+    except Exception:
+        pass
+    try:
+        from src.database.redis.redis_client import redis_client
+        await redis_client.close()
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _bypass_register_otp_gate(monkeypatch):
+    import importlib
+    mod = importlib.import_module("src.app.api.routers.auth_router")
+    async def _always_verified(_mobile, _purpose):
+        return True
+    monkeypatch.setattr(mod, "_otp_is_verified", _always_verified)
+
+
+@pytest.fixture(autouse=True)
+def _disable_rate_limiter(monkeypatch):
+    from src.app.api.rate_limiter import limiter
+    monkeypatch.setattr(limiter, "enabled", False)
+
+
 @pytest_asyncio.fixture
 async def client(app):
     transport = ASGITransport(app=app)

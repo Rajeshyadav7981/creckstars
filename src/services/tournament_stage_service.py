@@ -51,6 +51,7 @@ class TournamentStageService:
             stage = await TournamentStageRepository.create_stage(session, {
                 "tournament_id": tournament_id,
                 "stage_name": cfg["name"],
+                "stage_label": cfg.get("label"),
                 "stage_order": max_order + i + 1,
                 "status": "upcoming",
                 "qualification_rule": cfg.get("qualification_rule"),
@@ -576,6 +577,7 @@ class TournamentStageService:
             result.append({
                 "stage_id": stage.id,
                 "stage_name": stage.stage_name,
+                "stage_label": stage.stage_label,
                 "stage_order": stage.stage_order,
                 "status": stage.status,
                 "qualification_rule": stage.qualification_rule,

@@ -223,14 +223,10 @@ class MatchCache:
                 f"match:{match_id}:current_over",
                 f"cache:match_detail:{match_id}",
             ]
-            # Also invalidate squad cache
-            squad_keys = await r.keys(f"match:{match_id}:squad:*")
-            if squad_keys:
-                keys.extend(squad_keys)
-            # Also invalidate commentary cache
-            comm_keys = await r.keys(f"cache:comm:{match_id}:*")
-            if comm_keys:
-                keys.extend(comm_keys)
+            async for k in r.scan_iter(match=f"match:{match_id}:squad:*", count=200):
+                keys.append(k)
+            async for k in r.scan_iter(match=f"cache:comm:{match_id}:*", count=200):
+                keys.append(k)
             await r.delete(*keys)
         except Exception as e:
             logger.warning(f"Redis operation failed: {e}")

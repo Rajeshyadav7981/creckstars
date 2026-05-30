@@ -32,12 +32,14 @@ async def create_match(
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user),
 ):
+    name_clean = (req.name or "").strip() or None
     m = await MatchService.create_match(
         session, user.id,
         tournament_id=req.tournament_id, team_a_id=req.team_a_id, team_b_id=req.team_b_id,
         venue_id=req.venue_id, match_date=req.match_date, overs=req.overs,
         match_type=req.match_type, time_slot=req.time_slot,
         stage_id=req.stage_id, group_id=req.group_id,
+        name=name_clean,
     )
     from src.app.api.routers.user_router import invalidate_user_stats
     await invalidate_user_stats(user.id)
@@ -113,7 +115,7 @@ async def list_matches(
             sa = ms.get(m.team_a_id, {})
             sb = ms.get(m.team_b_id, {})
             result.append({
-                "id": m.id, "match_code": m.match_code, "status": m.status,
+                "id": m.id, "match_code": m.match_code, "name": m.name, "status": m.status,
                 "team_a_id": m.team_a_id, "team_b_id": m.team_b_id,
                 "team_a_name": team_names.get(m.team_a_id), "team_b_name": team_names.get(m.team_b_id),
                 "team_a_runs": sa.get("runs"), "team_a_wickets": sa.get("wickets"), "team_a_overs": sa.get("overs"),
@@ -165,6 +167,10 @@ async def get_match(
     from src.database.redis.match_cache import MatchCache
     cached_data = await MatchCache.get_generic(f"match_detail:{match_id}")
     if cached_data:
+        if user:
+            from src.database.postgres.repositories.favorite_repository import FavoriteRepository
+            cached_data = dict(cached_data)
+            cached_data["is_favorite"] = await FavoriteRepository.is_match_favorite(session, user.id, match_id)
         return cached_data
     m = await MatchService.get_match(session, match_id)
     # Batch-load related entities in one query instead of individual session.get()
@@ -182,7 +188,7 @@ async def get_match(
         from src.database.postgres.schemas.venue_schema import VenueSchema
         venue = await session.get(VenueSchema, m.venue_id)
     result = {
-        "id": m.id, "match_code": m.match_code, "status": m.status,
+        "id": m.id, "match_code": m.match_code, "name": m.name, "status": m.status,
         "team_a_id": m.team_a_id, "team_b_id": m.team_b_id,
         "team_a_name": team_a.name if team_a else None,
         "team_b_name": team_b.name if team_b else None,
@@ -208,6 +214,10 @@ async def get_match(
     }
     ttl = 10 if m.status in ('in_progress', 'live') else 120
     await MatchCache.set_generic(f"match_detail:{match_id}", result, ttl=ttl)
+    if user:
+        from src.database.postgres.repositories.favorite_repository import FavoriteRepository
+        result = dict(result)
+        result["is_favorite"] = await FavoriteRepository.is_match_favorite(session, user.id, match_id)
     return result
 
 
@@ -216,6 +226,7 @@ class UpdateMatchRequest(BaseModel):
     overs: Optional[int] = None
     match_date: Optional[date] = None
     time_slot: Optional[str] = None
+    name: Optional[str] = None
 
 
 @router.patch("/{match_id}")

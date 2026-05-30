@@ -29,35 +29,31 @@ class VenueRepository:
 
     @staticmethod
     async def get_nearby(session: AsyncSession, lat: float, lng: float, radius_km: float = 50) -> list:
-        """Find venues within radius_km using Haversine formula in SQL."""
-        query = text("""
-            SELECT *, (
-                6371 * acos(
-                    cos(radians(:lat)) * cos(radians(latitude))
-                    * cos(radians(longitude) - radians(:lng))
-                    + sin(radians(:lat)) * sin(radians(latitude))
-                )
-            ) AS distance_km
+        """Venues within radius_km of (lat, lng), nearest first.
+
+        Hits the GIST ix_venues_earth index via earth_box; earth_distance trims
+        the bounding box to a circle and provides the sort key.
+        """
+        radius_m = float(radius_km) * 1000.0
+        query = text(
+            """
+            SELECT id, name, city, ground_type, address, latitude, longitude,
+                   created_by, created_at,
+                   earth_distance(
+                       ll_to_earth(:lat, :lng),
+                       ll_to_earth(latitude, longitude)
+                   ) / 1000.0 AS distance_km
             FROM venues
-            WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-            HAVING distance_km <= :radius
+            WHERE latitude IS NOT NULL
+              AND longitude IS NOT NULL
+              AND ll_to_earth(latitude, longitude)
+                  <@ earth_box(ll_to_earth(:lat, :lng), :radius_m)
+              AND earth_distance(
+                    ll_to_earth(:lat, :lng),
+                    ll_to_earth(latitude, longitude)
+                  ) <= :radius_m
             ORDER BY distance_km
-        """)
-        # PostgreSQL doesn't support HAVING without GROUP BY for computed columns,
-        # so use a subquery approach instead
-        query = text("""
-            SELECT * FROM (
-                SELECT id, name, city, ground_type, address, latitude, longitude, created_by, created_at,
-                    (6371 * acos(
-                        LEAST(1.0, cos(radians(:lat)) * cos(radians(latitude))
-                        * cos(radians(longitude) - radians(:lng))
-                        + sin(radians(:lat)) * sin(radians(latitude)))
-                    )) AS distance_km
-                FROM venues
-                WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-            ) sub
-            WHERE distance_km <= :radius
-            ORDER BY distance_km
-        """)
-        result = await session.execute(query, {"lat": lat, "lng": lng, "radius": radius_km})
+            """
+        )
+        result = await session.execute(query, {"lat": lat, "lng": lng, "radius_m": radius_m})
         return result.mappings().all()

@@ -7,6 +7,7 @@ class MatchSchema(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     match_code = Column(String(10), unique=True, nullable=True, index=True)
+    name = Column(String(200), nullable=True)
     tournament_id = Column(Integer, ForeignKey("tournaments.id"), nullable=True)
     team_a_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
     team_b_id = Column(Integer, ForeignKey("teams.id"), nullable=False)

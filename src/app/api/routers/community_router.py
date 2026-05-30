@@ -48,21 +48,18 @@ async def upload_community_image(
     try:
         from PIL import Image as PILImage
         import io
+        import asyncio as _asyncio
         from src.utils.image_compress import compress_to_target_size
         img = PILImage.open(io.BytesIO(content))
-        content = compress_to_target_size(img, target_bytes=2 * 1024 * 1024, max_width=1024)
+        content = await _asyncio.to_thread(compress_to_target_size, img, 2 * 1024 * 1024, 1024)
         ext = ".jpg"
     except Exception as _e:
         logger.warning('Image compression skipped', extra={'extra_data': {'error': str(_e)}})
 
-    community_dir = os.path.join(UPLOADS_DIR, "community")
-    os.makedirs(community_dir, exist_ok=True)
+    from src.services.storage_service import save_image
     filename = f"{user.id}_{uuid.uuid4().hex[:8]}{ext}"
-    filepath = os.path.join(community_dir, filename)
-    with open(filepath, "wb") as f:
-        f.write(content)
-
-    image_url = f"/uploads/community/{filename}"
+    ctype = "image/jpeg" if ext == ".jpg" else "application/octet-stream"
+    image_url = await save_image(content, "community", filename, content_type=ctype)
     return {"image_url": image_url}
 
 
@@ -187,7 +184,7 @@ async def get_comments(
     post_id: int,
     max_depth: int = Query(2, ge=1, le=20),
     parent_id: int = Query(None),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_async_db),
     user=Depends(get_current_user_optional),

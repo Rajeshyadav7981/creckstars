@@ -176,6 +176,7 @@ class MatchService:
                 "player_id": player.id,
                 "full_name": player.full_name,
                 "role": player.role,
+                "profile_image": player.profile_image,
                 "batting_order": sq.batting_order,
                 "is_playing": sq.is_playing,
             })

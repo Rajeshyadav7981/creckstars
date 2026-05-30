@@ -1,4 +1,5 @@
 import asyncio
+import weakref
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db
@@ -8,13 +9,14 @@ from src.database.redis.match_cache import MatchCache
 
 router = APIRouter(prefix="/api/matches", tags=["Scorecards"])
 
-# Locks to prevent thundering herd — only 1 DB query per cache key at a time
-_locks: dict[str, asyncio.Lock] = {}
+_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
 
 def _get_lock(key: str) -> asyncio.Lock:
-    if key not in _locks:
-        _locks[key] = asyncio.Lock()
-    return _locks[key]
+    lock = _locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _locks[key] = lock
+    return lock
 
 
 @router.get("/{match_id}/scorecard")
@@ -28,18 +30,29 @@ async def get_scorecard(
         return cached
 
     async with _get_lock(f"sc:{match_id}"):
-        # Double-check after acquiring lock (another request may have populated cache)
         cached = await MatchCache.get_scorecard(match_id)
         if cached:
             return cached
 
-        scorecard = await ScorecardService.get_full_scorecard(session, match_id)
-        if not scorecard:
-            return {"error": "Match not found"}
-        # Completed matches rarely change — cache for 10 min; live matches for 60s
-        ttl = 600 if scorecard.get("status") == "completed" else 60
-        await MatchCache.set_scorecard(match_id, scorecard, ttl=ttl)
-        return scorecard
+        lock_name = f"sc:{match_id}"
+        got_lock = await MatchCache.try_acquire_refresh_lock(lock_name, ttl=10)
+        if not got_lock:
+            for _ in range(8):
+                await asyncio.sleep(0.05)
+                cached = await MatchCache.get_scorecard(match_id)
+                if cached:
+                    return cached
+
+        try:
+            scorecard = await ScorecardService.get_full_scorecard(session, match_id)
+            if not scorecard:
+                return {"error": "Match not found"}
+            ttl = 600 if scorecard.get("status") == "completed" else 60
+            await MatchCache.set_scorecard(match_id, scorecard, ttl=ttl)
+            return scorecard
+        finally:
+            if got_lock:
+                await MatchCache.release_refresh_lock(lock_name)
 
 
 @router.get("/{match_id}/live-state")

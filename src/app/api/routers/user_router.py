@@ -178,34 +178,36 @@ async def get_public_profile(
             select(_PS.id).where(_PS.user_id == target.id).order_by(_PS.id).limit(1)
         )
         linked_player_id = pres.scalar_one_or_none()
-        # Legacy backfill for users who registered before auto-create-on-register
-        # existed — mint a player row on first profile view so PlayerProfile is reachable.
         if linked_player_id is None:
-            try:
+            from src.utils.background_tasks import fire_and_forget
+            from src.database.postgres.db import db as _db
+            payload = {
+                "user_id": target.id,
+                "first_name": target.first_name,
+                "last_name": target.last_name,
+                "full_name": target.full_name,
+                "mobile": target.mobile,
+                "profile_image": target.profile,
+                "bio": getattr(target, 'bio', None),
+                "city": getattr(target, 'city', None),
+                "state_province": getattr(target, 'state_province', None),
+                "country": getattr(target, 'country', None),
+                "date_of_birth": getattr(target, 'date_of_birth', None),
+                "batting_style": getattr(target, 'batting_style', None),
+                "bowling_style": getattr(target, 'bowling_style', None),
+                "role": getattr(target, 'player_role', None),
+                "created_by": target.id,
+            }
+
+            async def _backfill_legacy_player():
                 from src.database.postgres.repositories.player_repository import PlayerRepository as _PR
-                new_player = await _PR.create(session, {
-                    "user_id": target.id,
-                    "first_name": target.first_name,
-                    "last_name": target.last_name,
-                    "full_name": target.full_name,
-                    "mobile": target.mobile,
-                    "profile_image": target.profile,
-                    "bio": getattr(target, 'bio', None),
-                    "city": getattr(target, 'city', None),
-                    "state_province": getattr(target, 'state_province', None),
-                    "country": getattr(target, 'country', None),
-                    "date_of_birth": getattr(target, 'date_of_birth', None),
-                    "batting_style": getattr(target, 'batting_style', None),
-                    "bowling_style": getattr(target, 'bowling_style', None),
-                    "role": getattr(target, 'player_role', None),
-                    "created_by": target.id,
-                })
-                linked_player_id = new_player.id
-            except Exception as _e:
-                logger.warning(
-                    'Legacy player auto-create failed',
-                    extra={'extra_data': {'user_id': target.id, 'error': str(_e)}},
-                )
+                from src.database.postgres.schemas.player_schema import PlayerSchema as _PS2
+                async with _db.AsyncSessionLocal() as s:
+                    existing = await s.execute(select(_PS2.id).where(_PS2.user_id == target.id).limit(1))
+                    if existing.scalar_one_or_none() is not None:
+                        return
+                    await _PR.create(s, payload)
+            fire_and_forget(_backfill_legacy_player(), name=f"legacy-player:{target.id}")
         profile_data = {
             "id": target.id,
             "player_id": linked_player_id,
@@ -225,7 +227,7 @@ async def get_public_profile(
             "followers_count": getattr(target, 'followers_count', 0) or 0,
             "following_count": getattr(target, 'following_count', 0) or 0,
         }
-        if r:
+        if r and linked_player_id is not None:
             try:
                 await r.setex(cache_key, 300, _json.dumps(profile_data))
             except Exception as _e:
@@ -401,6 +403,15 @@ async def follow_user(
                 keys.append(f"profile:{user.username.lower()}")
             if target_username:
                 keys.append(f"profile:{target_username.lower()}")
+            # PlayerProfile reads follower/following counts from the player_stats
+            # cache (stored as `cache:player_stats:{pid}`); purge both users'
+            # linked player rows so the counts aren't served stale for 30s.
+            prows = await session.execute(
+                text("SELECT id FROM players WHERE user_id IN (:uid, :tid)"),
+                {"uid": user.id, "tid": target_id},
+            )
+            for (pid,) in prows.all():
+                keys.append(f"cache:player_stats:{pid}")
             await r.delete(*keys)
             # Paginated list caches use versioned keys like `followers:v2:{id}:*`
             # — the plain-prefix delete above won't touch them. Scan & purge.
@@ -455,6 +466,15 @@ async def unfollow_user(
                 keys.append(f"profile:{user.username.lower()}")
             if target_username:
                 keys.append(f"profile:{target_username.lower()}")
+            # PlayerProfile reads follower/following counts from the player_stats
+            # cache (stored as `cache:player_stats:{pid}`); purge both users'
+            # linked player rows so the counts aren't served stale for 30s.
+            prows = await session.execute(
+                text("SELECT id FROM players WHERE user_id IN (:uid, :tid)"),
+                {"uid": user.id, "tid": target_id},
+            )
+            for (pid,) in prows.all():
+                keys.append(f"cache:player_stats:{pid}")
             await r.delete(*keys)
             # Same purge as /follow — catches the versioned pagination keys.
             async for k in r.scan_iter(match=f"followers:v2:{target_id}:*", count=200):

@@ -28,6 +28,7 @@ class AddTeamToTournamentRequest(BaseModel):
 
 class StageConfig(BaseModel):
     name: str = Field(..., min_length=1, max_length=50)
+    label: str | None = Field(None, max_length=80)
     qualification_rule: dict | None = None
 
 

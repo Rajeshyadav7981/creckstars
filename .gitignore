@@ -16,3 +16,7 @@ env/
 
 # Uploads (runtime user data, not code)
 uploads/
+
+# Throwaway OTP test artifacts (contain live tokens) — never commit
+.verifynow_test.json
+test_verifynow.py

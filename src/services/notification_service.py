@@ -7,6 +7,7 @@ from src.database.postgres.db import db
 from src.database.redis.redis_client import redis_client
 from src.database.postgres.schemas.push_token_schema import PushTokenSchema, MatchSubscriptionSchema
 from src.utils.logger import get_logger
+from src.utils.http_client import get_http_client
 
 logger = get_logger(__name__)
 
@@ -45,18 +46,17 @@ class NotificationService:
             for token in unique_tokens
         ]
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for i in range(0, len(messages), 100):
-                batch = messages[i:i + 100]
-                # Retry with exponential backoff (up to 3 attempts)
-                for attempt in range(3):
-                    try:
-                        resp = await client.post(EXPO_PUSH_URL, json=batch)
-                        if resp.status_code == 200:
-                            break
-                        logger.warning(f"Expo push response: {resp.status_code} (attempt {attempt + 1})")
-                    except Exception as e:
-                        logger.error(f"Expo push failed (attempt {attempt + 1}): {e}")
+        client = get_http_client()
+        for i in range(0, len(messages), 100):
+            batch = messages[i:i + 100]
+            for attempt in range(3):
+                try:
+                    resp = await client.post(EXPO_PUSH_URL, json=batch, timeout=10.0)
+                    if resp.status_code == 200:
+                        break
+                    logger.warning(f"Expo push response: {resp.status_code} (attempt {attempt + 1})")
+                except Exception as e:
+                    logger.error(f"Expo push failed (attempt {attempt + 1}): {e}")
                     if attempt < 2:
                         await asyncio.sleep(2 ** attempt)  # 1s, 2s backoff
 
