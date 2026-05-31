@@ -1,5 +1,5 @@
 from fastapi import HTTPException, status
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.repositories.match_event_repository import MatchEventRepository
 from src.database.postgres.repositories.delivery_repository import DeliveryRepository
@@ -154,17 +154,15 @@ class UndoService:
         # Mark delivery event as undone
         await MatchEventRepository.mark_undone(session, last_event.id)
 
-        # Also mark any end_over/undo events AFTER this delivery as undone
-        later_events = await session.execute(
-            select(MatchEventSchema)
+        await session.execute(
+            update(MatchEventSchema)
             .where(
                 MatchEventSchema.match_id == match_id,
                 MatchEventSchema.sequence_number > last_event.sequence_number,
                 MatchEventSchema.is_undone == False,
             )
+            .values(is_undone=True)
         )
-        for evt in later_events.scalars().all():
-            evt.is_undone = True
 
         # Delete the delivery
         if delivery_id:

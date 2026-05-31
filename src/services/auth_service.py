@@ -2,7 +2,10 @@ from datetime import timedelta
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.repositories.user_repository import UserRepository
-from src.utils.security import hash_password, verify_password, needs_rehash, create_access_token, create_refresh_token
+from src.utils.security import (
+    hash_password, verify_password, needs_rehash, create_access_token, create_refresh_token,
+    hash_password_async, verify_password_async,
+)
 from src.app.api.config import ACCESS_TOKEN_EXPIRE_MINUTES
 from src.utils.logger import get_logger
 
@@ -90,7 +93,7 @@ class AuthService:
             "full_name": f"{first_name} {last_name}",
             "mobile": mobile,
             "email": email,
-            "password": hash_password(password),
+            "password": await hash_password_async(password),
             "profile": profile,
             "username": username,
             "bio": bio,
@@ -259,7 +262,7 @@ class AuthService:
                 detail="No account found with this mobile number",
             )
 
-        if not verify_password(password, user.password):
+        if not await verify_password_async(password, user.password):
             logger.info("Login failed: invalid password", extra={"extra_data": {
                 "mobile": mobile, "success": False,
             }})
@@ -270,7 +273,7 @@ class AuthService:
 
         # Auto-rehash legacy SHA-256 passwords to bcrypt on successful login
         if needs_rehash(user.password):
-            new_hash = hash_password(password)
+            new_hash = await hash_password_async(password)
             await UserRepository.update_password(session, user.id, new_hash)
 
         token = create_access_token(

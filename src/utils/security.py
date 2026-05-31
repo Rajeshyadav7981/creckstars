@@ -82,21 +82,28 @@ oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_e
 
 
 def hash_password(password: str) -> str:
-    """Hash password using bcrypt."""
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify password against bcrypt hash. Also supports legacy SHA-256 for migration."""
     try:
         if bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8")):
             return True
     except (ValueError, TypeError):
         pass
-    # Fallback: legacy SHA-256 check for existing users
     if hashlib.sha256(plain_password.encode("utf-8")).hexdigest() == hashed_password:
         return True
     return False
+
+
+async def hash_password_async(password: str) -> str:
+    import asyncio
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def verify_password_async(plain_password: str, hashed_password: str) -> bool:
+    import asyncio
+    return await asyncio.to_thread(verify_password, plain_password, hashed_password)
 
 
 def needs_rehash(hashed_password: str) -> bool:

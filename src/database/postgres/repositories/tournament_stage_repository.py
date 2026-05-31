@@ -69,6 +69,20 @@ class TournamentStageRepository:
         return result.all()
 
     @staticmethod
+    async def get_group_teams_for_groups(session, group_ids):
+        if not group_ids:
+            return {}
+        result = await session.execute(
+            select(TeamSchema, TournamentGroupTeamSchema)
+            .join(TournamentGroupTeamSchema, TeamSchema.id == TournamentGroupTeamSchema.team_id)
+            .where(TournamentGroupTeamSchema.group_id.in_(group_ids))
+        )
+        by_group = {}
+        for team, gt in result.all():
+            by_group.setdefault(gt.group_id, []).append((team, gt))
+        return by_group
+
+    @staticmethod
     async def update_team_status(session, group_id, team_id, status):
         result = await session.execute(
             select(TournamentGroupTeamSchema)

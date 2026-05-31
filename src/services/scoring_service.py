@@ -676,14 +676,15 @@ class ScoringService:
             "result_summary": result_summary,
         })
 
-        # Mark all innings as completed and finalize batting scorecards
         for inn in innings_list:
             if inn.status != "completed":
                 await InningsRepository.update(session, inn.id, {"status": "completed"})
-            batting_cards = await ScorecardRepository.get_batting_by_innings(session, inn.id)
-            for card in batting_cards:
-                if not card.is_out and card.how_out is None:
-                    card.how_out = "not out"
+        all_batting = await ScorecardRepository.get_batting_for_innings_ids(
+            session, [inn.id for inn in innings_list],
+        )
+        for card in all_batting:
+            if not card.is_out and card.how_out is None:
+                card.how_out = "not out"
         await session.flush()
         await session.commit()
 

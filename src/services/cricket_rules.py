@@ -1,6 +1,34 @@
 """Cricket rules validation engine — extracted from ScoringService."""
 
 
+def overs_to_balls(total_overs) -> int:
+    """Convert cricket display-format overs (X.Y where Y∈[0..5] is balls)
+    into a total ball count. e.g. 4.3 → 27 balls, not 4.5 overs."""
+    if not total_overs:
+        return 0
+    try:
+        ov = float(total_overs)
+    except (TypeError, ValueError):
+        return 0
+    whole = int(ov)
+    balls = round((ov - whole) * 10)
+    if balls < 0:
+        balls = 0
+    if balls > 5:
+        balls = 5
+    return whole * 6 + balls
+
+
+def nrr_for_team(balls_faced: int, runs_scored: int,
+                 balls_bowled: int, runs_conceded: int) -> float:
+    """Net Run Rate using balls (not display-format overs).
+    NRR = (runs_for / overs_faced) - (runs_against / overs_bowled)
+    where overs_* = balls_* / 6 (true decimal overs)."""
+    rr_for = (runs_scored * 6 / balls_faced) if balls_faced > 0 else 0.0
+    rr_against = (runs_conceded * 6 / balls_bowled) if balls_bowled > 0 else 0.0
+    return round(rr_for - rr_against, 3)
+
+
 class CricketRules:
     """Validates cricket laws for deliveries."""
 

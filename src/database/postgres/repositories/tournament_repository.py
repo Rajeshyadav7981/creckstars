@@ -132,9 +132,12 @@ class TournamentRepository:
             if status:
                 query = query.where(TournamentSchema.status == status)
             if search:
+                pat = f"%{search}%"
                 query = query.where(or_(
-                    TournamentSchema.name.ilike(f"%{search}%"),
-                    TournamentSchema.tournament_code.ilike(f"%{search}%"),
+                    TournamentSchema.name.ilike(pat),
+                    TournamentSchema.tournament_code.ilike(pat),
+                    TournamentSchema.location.ilike(pat),
+                    TournamentSchema.organizer_name.ilike(pat),
                 ))
             query = query.order_by(TournamentSchema.created_at.desc()).limit(limit).offset(offset)
             result = await session.execute(query)

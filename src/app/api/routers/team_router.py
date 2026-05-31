@@ -6,7 +6,7 @@ from src.database.postgres.db import get_async_db
 from src.utils.security import get_current_user, get_current_user_optional
 from src.services.team_service import TeamService
 from fastapi import HTTPException
-from src.app.api.routers.models.team_model import CreateTeamRequest, AddPlayerToTeamRequest, UpdatePlayerRoleRequest
+from src.app.api.routers.models.team_model import CreateTeamRequest, UpdateTeamRequest, AddPlayerToTeamRequest, UpdatePlayerRoleRequest
 from src.app.api.rate_limiter import limiter
 from src.app.api.config import RATE_LIMITS
 
@@ -53,6 +53,23 @@ async def get_team(
     user=Depends(get_current_user_optional),
 ):
     return await TeamService.get_team_detail(session, team_id)
+
+
+@router.patch("/{team_id}")
+async def update_team(
+    team_id: int,
+    req: UpdateTeamRequest,
+    session: AsyncSession = Depends(get_async_db),
+    user=Depends(get_current_user),
+):
+    team = await TeamService.update_team(session, team_id, req.model_dump(exclude_unset=True), user_id=user.id)
+    return {
+        "id": team.id, "team_code": team.team_code, "name": team.name,
+        "short_name": team.short_name, "color": team.color, "city": team.city,
+        "home_ground": team.home_ground, "logo_url": team.logo_url,
+        "latitude": team.latitude, "longitude": team.longitude,
+        "created_by": team.created_by,
+    }
 
 
 @router.post("/{team_id}/players")

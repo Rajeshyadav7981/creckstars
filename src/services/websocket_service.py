@@ -1,9 +1,19 @@
-import json
 import asyncio
 import os
 from fastapi import WebSocket
 from src.database.redis.redis_client import redis_client
 from src.utils.logger import get_logger
+
+try:
+    import orjson  # type: ignore[import-not-found]
+
+    def _dumps(obj) -> str:
+        return orjson.dumps(obj).decode()
+except ImportError:
+    import json
+
+    def _dumps(obj) -> str:
+        return json.dumps(obj)
 
 logger = get_logger(__name__)
 
@@ -52,18 +62,14 @@ class ConnectionManager:
         self._failures.pop(id(websocket), None)
 
     async def broadcast(self, match_id: int, message: dict):
-        """Publish to Redis channel + broadcast to local connections."""
-        data = json.dumps(message)
-
-        # Publish to Redis for other server instances
+        data = _dumps(message)
         try:
             r = await redis_client.get_client()
             if r:
                 await r.publish(f"match:{match_id}:live", data)
+                return
         except Exception as e:
             logger.warning(f"Redis publish failed for match {match_id}: {e}")
-
-        # Broadcast to local connections
         await self._broadcast_local(match_id, data)
 
     async def _broadcast_local(self, match_id: int, data: str):

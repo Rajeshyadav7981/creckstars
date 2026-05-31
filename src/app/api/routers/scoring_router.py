@@ -1,4 +1,5 @@
 import asyncio as _asyncio
+from src.utils.background_tasks import fire_and_forget as _fire_and_forget
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.db import get_async_db, db as _db
@@ -113,7 +114,7 @@ async def score_delivery(
     result = await ScoringService.record_delivery(session, match_id, user.id, req.model_dump())
     # Fire-and-forget: refresh cache in the background without blocking
     # the worker (FastAPI BackgroundTasks would serialize on a single worker).
-    _asyncio.create_task(_refresh_cache_background(match_id))
+    _fire_and_forget(_refresh_cache_background(match_id), name=f"score_refresh_{match_id}")
     return result
 
 
@@ -144,7 +145,7 @@ async def end_over(
 ):
     await _check_match_owner(session, match_id, user.id)
     result = await ScoringService.end_over(session, match_id, req.next_bowler_id)
-    _asyncio.create_task(_refresh_cache_background(match_id))
+    _fire_and_forget(_refresh_cache_background(match_id), name=f"score_refresh_{match_id}")
     return result
 
 
@@ -159,7 +160,7 @@ async def end_innings(
 ):
     await _check_match_owner(session, match_id, user.id)
     result = await ScoringService.end_innings(session, match_id)
-    _asyncio.create_task(_refresh_cache_background(match_id))
+    _fire_and_forget(_refresh_cache_background(match_id), name=f"score_refresh_{match_id}")
     return result
 
 
@@ -251,10 +252,10 @@ async def revert_match(
     from src.services.revert_service import RevertService
     result = await RevertService.revert_completed_match(session, match_id, user.id)
     await MatchCache.invalidate_match(match_id)
-    # Status flipped back from completed → live, so home cards are stale
     from src.utils.cache import invalidate_pattern
     await invalidate_pattern(f"matches:u{match.created_by}:*")
     await invalidate_pattern(f"matches:u{user.id}:*")
+    await _invalidate_tournament_caches(match.tournament_id)
     return result
 
 
@@ -300,6 +301,20 @@ async def get_broadcast(match_id: int):
     return {"message": msg}
 
 
+async def _invalidate_tournament_caches(tournament_id: int):
+    if not tournament_id:
+        return
+    from src.utils.cache import invalidate
+    await invalidate(f"tournament:{tournament_id}")
+    await MatchCache.set_generic(f"standings:{tournament_id}", None, ttl=1)
+    await MatchCache.set_generic(f"leaderboard:{tournament_id}", None, ttl=1)
+    try:
+        from src.database.redis.leaderboard_cache import LeaderboardCache
+        await LeaderboardCache.invalidate_tournament(tournament_id)
+    except Exception as _e:
+        logger.warning(f"leaderboard cache invalidate failed: {_e}")
+
+
 @router.post("/{match_id}/abandon")
 async def abandon_match(
     match_id: int,
@@ -325,6 +340,7 @@ async def abandon_match(
     from src.utils.cache import invalidate_pattern
     if match:
         await invalidate_pattern(f"matches:u{match.created_by}:*")
+        await _invalidate_tournament_caches(match.tournament_id)
     await invalidate_pattern(f"matches:u{user.id}:*")
     return {"status": "abandoned", "result_summary": reason}
 
@@ -337,7 +353,7 @@ async def no_result_match(
     user=Depends(get_current_user),
 ):
     """Mark a match as no result (rain, etc.)."""
-    await _check_match_owner(session, match_id, user.id)
+    match = await _check_match_owner(session, match_id, user.id)
     reason = req.reason if req and req.reason else "No result"
     await MatchRepository.update(session, match_id, {
         "status": "completed", "result_type": "no_result",
@@ -351,5 +367,8 @@ async def no_result_match(
         logger.error(f"Stage progression failed after no-result for match {match_id}: {e}")
     await MatchCache.invalidate_match(match_id)
     from src.utils.cache import invalidate_pattern
+    if match:
+        await invalidate_pattern(f"matches:u{match.created_by}:*")
+        await _invalidate_tournament_caches(match.tournament_id)
     await invalidate_pattern(f"matches:u{user.id}:*")
     return {"status": "no_result", "result_summary": reason}

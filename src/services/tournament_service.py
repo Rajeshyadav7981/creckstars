@@ -155,9 +155,9 @@ class TournamentService:
                 "drawn": 0,
                 "points": 0,
                 "runs_scored": 0,
-                "overs_faced": 0.0,
+                "balls_faced": 0,
                 "runs_conceded": 0,
-                "overs_bowled": 0.0,
+                "balls_bowled": 0,
                 "nrr": 0.0,
             }
 
@@ -213,23 +213,28 @@ class TournamentService:
             if rt in ('walkover', 'forfeit', 'awarded'):
                 continue
 
-            # Accumulate runs and overs from innings
+            # Accumulate runs and BALLS from innings — partial overs (e.g. 4.3)
+            # cannot be summed in display format; we convert to balls first.
+            from src.services.cricket_rules import overs_to_balls
             match_innings = innings_by_match.get(match.id, [])
             for inn in match_innings:
                 bat_team = inn.batting_team_id
                 bowl_team = inn.bowling_team_id
+                inn_balls = overs_to_balls(inn.total_overs)
                 if bat_team in standings:
                     standings[bat_team]["runs_scored"] += inn.total_runs or 0
-                    standings[bat_team]["overs_faced"] += inn.total_overs or 0.0
+                    standings[bat_team]["balls_faced"] += inn_balls
                 if bowl_team in standings:
                     standings[bowl_team]["runs_conceded"] += inn.total_runs or 0
-                    standings[bowl_team]["overs_bowled"] += inn.total_overs or 0.0
+                    standings[bowl_team]["balls_bowled"] += inn_balls
 
-        # Calculate NRR for each team
+        # Calculate NRR using balls (not display-format overs)
+        from src.services.cricket_rules import nrr_for_team
         for s in standings.values():
-            run_rate_for = (s["runs_scored"] / s["overs_faced"]) if s["overs_faced"] > 0 else 0.0
-            run_rate_against = (s["runs_conceded"] / s["overs_bowled"]) if s["overs_bowled"] > 0 else 0.0
-            s["nrr"] = round(run_rate_for - run_rate_against, 3)
+            s["nrr"] = nrr_for_team(
+                s["balls_faced"], s["runs_scored"],
+                s["balls_bowled"], s["runs_conceded"],
+            )
 
         # Sort by points desc, then NRR desc
         sorted_standings = sorted(
@@ -241,9 +246,9 @@ class TournamentService:
         # Remove intermediate fields from response
         for s in sorted_standings:
             del s["runs_scored"]
-            del s["overs_faced"]
+            del s["balls_faced"]
             del s["runs_conceded"]
-            del s["overs_bowled"]
+            del s["balls_bowled"]
 
         return sorted_standings
 

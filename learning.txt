@@ -1,0 +1,246 @@
+(Side note: those Package not installed diagnostics are the IDE pointing at the system Python
+  interpreter, not the venv. The packages are installed — verified earlier with venv/bin/python -c
+   "import uvloop". Switch the interpreter to backend/venv/bin/python to clear them.)
+
+  Now to your real question — 1,000 matches × 1,000 viewers = 1,000,000 simultaneous WS 
+  connections. Let me be honest about what that takes.
+
+  What 1M concurrent WS actually costs
+
+  ┌─────────────────────┬──────────────────────────────────┬──────────────────────────────────┐
+  │      Resource       │               Need               │  What a 2 vCPU / 2 GB VM gives   │
+  │                     │                                  │               you                │
+  ├─────────────────────┼──────────────────────────────────┼──────────────────────────────────┤
+  │ Memory (≈30         │ ~30 GB                           │ 2 GB ❌                          │
+  │ KB/conn)            │                                  │                                  │
+  ├─────────────────────┼──────────────────────────────────┼──────────────────────────────────┤
+  │ File descriptors    │ 1,000,000                        │ 65k after ulimit ❌              │
+  ├─────────────────────┼──────────────────────────────────┼──────────────────────────────────┤
+  │ Network out per     │ 1M × 500 B = 500 MB              │ typical VM: ~12 MB/s ❌          │
+  │ ball                │                                  │                                  │
+  ├─────────────────────┼──────────────────────────────────┼──────────────────────────────────┤
+  │ CPU per second      │ ~10k broadcast events/s ×        │ 2 cores ❌                       │
+  │                     │ fan-out                          │                                  │
+  └─────────────────────┴──────────────────────────────────┴──────────────────────────────────┘
+
+  So no — the current single-VM setup cannot do 1M WS. It's not "tuneable", it's a fundamentally
+  different scale tier. Anyone telling you a $20/month VM serves 1M WS is wrong.
+
+  Tier-by-tier map of where the current architecture sits
+  
+  ┌─────────────────────┬─────────────────┬──────────────────────────────────┬───────────────┐
+  │        Tier         │ Total live WS   │           Architecture           │     Cost      │
+  │                     │     viewers     │                                  │               │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────┼───────────────┤
+  │ Today               │ ~5k–10k         │ 1 VM, 2 workers, uvloop+orjson   │ $20/month     │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────┼───────────────┤
+  │ 2× workers per VM   │ ~10k–20k        │ 4 workers, raise ulimit          │ same          │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────┼───────────────┤
+  │ Vertical scale      │ ~30k–50k        │ 4 vCPU / 8 GB VM                 │ $80/month     │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────┼───────────────┤
+  │ Horizontal: 5 VMs   │ ~100k–250k      │ Sticky-session LB, shared Redis  │ $400/month    │
+  │ behind LB           │                 │ cluster, PgBouncer               │               │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────┼───────────────┤
+  │ Dedicated WS tier   │ ~250k–500k      │ 3 API VMs + 5 dedicated WS VMs + │ $1,000+/month │
+  │                     │                 │  Redis cluster                   │               │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────┼───────────────┤
+  │ Edge-pushed         │ 1M+             │ Cloudflare Durable Objects /     │ $$$           │
+  │                     │                 │ Ably / Pusher fan-out            │               │
+  └─────────────────────┴─────────────────┴──────────────────────────────────┴───────────────┘
+
+  Your weekend usage almost certainly sits in tier 1. Real-world community-cricket: maybe 20-50
+  matches active at peak, ~20 viewers each = 1,000 WS total. The current setup absorbs that with
+  95% headroom.
+
+  Where to go IF you grew
+  
+  If hypothetically traffic exploded to that scale, the cheapest path that scales linearly is:
+  
+  Pattern A — Horizontal scale + sticky sessions (good up to ~250k WS)
+  
+                      ┌──────────────────────┐
+                      │  Nginx / HAProxy     │  ← sticky on match_id
+                      │  (consistent hash)   │
+                      └──┬───────┬──────┬────┘
+                         │       │      │
+                    ┌────▼─┐  ┌──▼──┐  ┌▼────┐
+                    │ API+ │  │ API+│  │ API+│   ← each does its own WS
+                    │ WS 1 │  │ WS 2│  │ WS 3│
+                    └────┬─┘  └──┬──┘  └─┬───┘
+                         │       │       │
+                         └──┐  ┌─┴─┐  ┌──┘
+                            ▼  ▼   ▼  ▼
+                         ┌──────────────┐
+                         │ Redis Pub/Sub│  ← single cluster
+                         │  + PG primary│
+                         └──────────────┘
+
+  Sticky hashing on match_id means every viewer of match X lands on the same VM → broadcast stays
+  local, no Redis Pub/Sub hop. This single architectural change increases WS capacity ~5× because
+  you eliminate the cross-worker fanout entirely for the common case.
+
+  The code change is small — the LB does the routing; the backend doesn't even know.
+  
+  Pattern B — Dedicated WS tier (good up to ~1M WS)
+
+  Split the deploy:
+  - API VMs: handle /score, /scorecard, etc. — pure HTTP
+  - WS VMs: handle ONLY wss:// connections, subscribe to Redis Pub/Sub
+  - Redis cluster: 3-node minimum, sharded by match_id
+
+  A score lands on an API VM → writes DB → publishes to Redis. WS VMs subscribe and fan out to
+  their local clients. Each WS VM holds ~50k connections.
+
+  For 1M WS you'd need ~20 WS VMs. Each VM is cheap because it's pure I/O (Python + uvloop is
+  fine).    
+
+  Pattern C — Managed edge service (only for truly viral)
+  
+  Cloudflare Durable Objects, Ably, Pusher, or PubNub. You publish events to them; they fan out to
+   viewers connected to edge PoPs near them. No connection ever reaches your origin.
+
+  Cost is per-message, so it's only economical for very broad fan-out (think IPL final, 5M
+  viewers).
+
+  My honest recommendation
+
+  For community cricket on a 2 GB VM, the current setup serving the realistic 5–10k peak is the 
+  right answer. You don't need any of the tiers above today.
+
+  The single most useful thing you can do before scaling out is make broadcast cheaper per 
+  connection:
+  - ✅ uvloop (shipped)
+  - ✅ orjson on WS path (shipped)
+  - ⏳ When/if you outgrow one VM, add sticky-hash routing on match_id at the load balancer.
+  That's a 10× free multiplier before you need a dedicated WS tier.
+ 
+  Numbers worth memorizing for capacity planning:
+
+  Single 2 GB VM, current code:                  ~5–10k total WS
+  Single 8 GB VM, current code:                  ~30–50k total WS
+  3-VM cluster, sticky on match_id:              ~150k total WS
+  Above that → dedicated WS tier (split deploy)
+
+  TL;DR: 1k matches × 1k viewers = 1M WS is a "managed-edge-service" scale problem, not a
+  code-tuning problem. Your current architecture is right-sized for community cricket and has
+  clear next steps if it explodes.
+
+✻ Baked for 43s
+
+❯ so is the backend well design                                                                   
+
+⏺ Honest assessment after spending several hours auditing it: yes, well-designed — solidly above 
+  MVP-grade, with a few real gaps you should know about.
+
+  Where it's genuinely strong
+
+  ┌────────────────┬──────────────────────────────────────────────────────────────────────────┐
+  │      Area      │                              Why it's good                               │
+  ├────────────────┼──────────────────────────────────────────────────────────────────────────┤
+  │ Layered        │ Clean router → service → repository → schema split. Each layer has a     │
+  │ architecture   │ defined job. Easy to extend.                                             │
+  ├────────────────┼──────────────────────────────────────────────────────────────────────────┤
+  │ Concurrency    │ with_for_update() on every mutation path (after this week's fixes).      │
+  │ correctness    │ INSERT … ON CONFLICT DO NOTHING for favorites. IntegrityError caught and │
+  │                │  surfaced as 409, never 500. 9/9 race-stress assertions green.           │
+  ├────────────────┼──────────────────────────────────────────────────────────────────────────┤
+  │ Idempotency    │ @idempotent(ttl_seconds=600) on every write endpoint. Double-tap from    │
+  │                │ flaky networks dedupes at the Redis layer without touching the DB.       │
+  ├────────────────┼──────────────────────────────────────────────────────────────────────────┤
+  │ Cache          │ Per-key TTLs tuned to access pattern (5s live-state, 60s scorecard, 600s │
+  │ architecture   │  for completed). Per-process asyncio.Lock + cross-process Redis SETNX    │
+  │                │ single-flight on both /live-state and /scorecard. No stampede possible.  │
+  │                 │ possible.                                                               │
+  ├─────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │                 │ Bulk fetches in record_delivery (one batting query + one bowling query, │
+  │ Hot-path        │  not 5). flush() instead of refresh() skips a roundtrip.                │
+  │ optimization    │ Fire-and-forget cache refresh — /score returns the instant the commit   │
+  │                 │ lands.                                                                  │
+  ├─────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │                 │ Per-match connection cap. Slow-client eviction with 3s timeout +        │
+  │ WebSocket layer │ 3-strike backpressure. Redis Pub/Sub for cross-worker fanout. orjson +  │
+  │                 │ uvloop (added today).                                                   │
+  ├─────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │                 │ 145 assertions across 11 probe suites. Real HTTP roundtrips + DB state  │
+  │ Test coverage   │ assertions, not unit-test mocks. New concurrency-stress + weekend-load  │
+  │                 │ probes for ongoing regression detection.                                │
+  ├─────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ Observability   │ Request-ID tracing middleware. Slow-request middleware (added today).   │
+  │ primitives      │ Structured logs with extra_data. Connection-pool / statement-timeout    │
+  │                 │ knobs all env-tunable.                                                  │
+  ├─────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ Frontend        │ ConfirmModal, Toast, BottomSheet reused across screens. useFocusEffect  │
+  │ primitives      │ for stale-data refresh. React Query patterns with optimistic updates.   │
+  └─────────────────┴─────────────────────────────────────────────────────────────────────────┘
+
+  Real gaps worth naming
+
+  ┌──────────────────────┬──────────┬─────────────────────────────────────────────────────────┐
+  │         Gap          │ Severity │                     Why it matters                      │
+  ├──────────────────────┼──────────┼─────────────────────────────────────────────────────────┤
+  │                      │          │ over_by_over vs over_series, did_not_bat vs yet_to_bat  │
+  │ Dead/typo'd field    │ Medium   │ — both shipped silently broken until I caught them.     │
+  │ references           │          │ Suggests not enough end-to-end UI verification before   │
+  │                     │            │ verification before merge.                            │
+  ├─────────────────────┼────────────┼───────────────────────────────────────────────────────┤
+  │ No CI pipeline      │ Medium     │ Probes exist but they're run manually. A test that    │
+  │                     │            │ doesn't run automatically protects nothing.            │
+  ├─────────────────────┼────────────┼────────────────────────────────────────────────────────┤
+  │ No                  │            │ No Sentry, no Prometheus, no uptime checks visible. If │
+  │ monitoring/alerts   │ Medium     │  /score starts erroring at 3 AM on Sunday you'll learn │
+  │                     │            │  from a user complaint, not an alert.                  │
+  ├─────────────────────┼────────────┼────────────────────────────────────────────────────────┤
+  │                     │            │ DEPLOYMENT.md says schema is managed via schema.sql,   │
+  │ Schema dual-source  │ Low        │ but Alembic migrations also exist. Two sources of      │
+  │                     │            │ truth invite drift.                                    │
+  ├─────────────────────┼────────────┼────────────────────────────────────────────────────────┤
+  │ Single VM, no       │ Medium for │ A reboot = downtime. Fine for community matches, not   │
+  │ redundancy          │  weekend   │ fine for tournament finals.                            │
+  ├─────────────────────┼────────────┼────────────────────────────────────────────────────────┤
+  │ No automated load   │ Low        │ probe_weekend_load.py exists, but isn't run before     │
+  │ test in CI          │            │ deploys.                                               │
+  ├─────────────────────┼────────────┼────────────────────────────────────────────────────────┤
+  │ Mixed Alert.alert / │            │ Half the screens use native Alert, half use Toast.     │
+  │  Toast              │ Cosmetic   │ Inconsistent UX. (We swept the team flow; the          │
+  │                     │            │ match/tournament flows are next.)                      │
+  ├─────────────────────┼────────────┼────────────────────────────────────────────────────────┤
+  │ Some dead code      │ Cosmetic   │ overChartData memo with no consumer; cleanup pending.  │
+  └─────────────────────┴────────────┴────────────────────────────────────────────────────────┘
+  
+  What category this puts the backend in
+  
+  MVP                Production-grade            FAANG-scale
+   ─────────────────────────────────────────────────────────
+                         ▲
+                         │
+                    YOU ARE HERE
+  
+  It correctly handles concurrency, scales to its target audience (community matches, 1k-5k DAU),
+  has the right primitives for caching/idempotency/eviction, and has a test suite that's actually
+  run. That's significantly above what most early-stage cricket/sports apps ship with.
+
+  It's not at "global SaaS" grade: no canary deploys, no chaos testing, no SLA monitoring, no
+  PgBouncer/read-replica/multi-region. But none of that is needed for the workload.
+
+  What I'd do in the next 2–4 weeks if you have time
+  
+  In rough order of impact for your trajectory:
+  
+  1. GitHub Actions CI that runs the probe suite on every PR. ~30 min of yaml writing. Stops
+  regressions at the door.
+  2. Sentry (free tier) for backend + frontend. ~1 hour. You'll see crashes you didn't know about.
+  3. One uptime monitor (UptimeRobot free) hitting /health. ~10 minutes. SMS at 3 AM if the box
+  dies.
+  4. Backup cron dumping Postgres to B2/S3 daily. ~30 minutes. Insurance against accidental data
+  loss.
+  5. Consolidate schema management — pick Alembic OR schema.sql, not both. Half day.
+  6. Sweep remaining Alert.alert to Toast for UX consistency. ~2 hours.
+
+  After those, the gap to "production-grade" closes meaningfully.
+
+  TL;DR
+
+  Yes, well-designed for what it needs to do. The concurrency story, cache patterns, and WebSocket
+   backpressure are genuinely well-thought-out — I rarely see all three done correctly in apps at
+  this stage. The gaps are operational hygiene (CI, monitoring, redundancy) more than
+  architectural flaws. For your weekend audience, it's ready.

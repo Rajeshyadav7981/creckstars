@@ -417,7 +417,7 @@ async def reset_password(
     """Reset password after OTP verification.
     Flow: user calls /send-otp with purpose='reset_password' → enters OTP + new password here.
     """
-    from src.utils.security import hash_password
+    from src.utils.security import hash_password_async
     from src.services.verifynow_service import VerifyNowService
 
     mobile = data.mobile.strip()
@@ -449,7 +449,7 @@ async def reset_password(
         await _otp_clear_failures(mobile, "reset_password")
 
     # Update password
-    await UserRepository.update_password(session, user.id, hash_password(new_password))
+    await UserRepository.update_password(session, user.id, await hash_password_async(new_password))
 
     try:
         from src.database.redis.redis_client import redis_client

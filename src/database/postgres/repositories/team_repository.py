@@ -26,6 +26,19 @@ class TeamRepository:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def update(session: AsyncSession, team_id: int, updates: dict) -> TeamSchema | None:
+        result = await session.execute(select(TeamSchema).where(TeamSchema.id == team_id))
+        team = result.scalar_one_or_none()
+        if not team:
+            return None
+        for k, v in updates.items():
+            if hasattr(team, k):
+                setattr(team, k, v)
+        await session.commit()
+        await session.refresh(team)
+        return team
+
+    @staticmethod
     async def get_all(
         session: AsyncSession, created_by: int = None,
         search: str = None, code: str = None,

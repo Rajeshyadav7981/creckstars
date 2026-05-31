@@ -35,12 +35,14 @@ class ScorecardService:
             "result": match.result_summary,
             "winner_id": match.winner_id,
             "overs": match.overs,
+            "team_a_id": match.team_a_id,
+            "team_b_id": match.team_b_id,
+            "team_a_name": team_name_map.get(match.team_a_id, ""),
+            "team_b_name": team_name_map.get(match.team_b_id, ""),
             "innings": [],
+            "team_squads": {},
         }
 
-        # Bulk-load batting/bowling/fow/partnerships for ALL innings in 4 queries
-        # instead of 4 queries per innings (was 8 queries for a 2-innings match;
-        # now 4 regardless of innings count). Group by innings_id below.
         from collections import defaultdict
         innings_ids = [inn.id for inn in innings_list]
         all_batting = await ScorecardRepository.get_batting_for_innings_ids(session, innings_ids)
@@ -48,6 +50,19 @@ class ScorecardService:
         all_fow = await ScorecardRepository.get_fall_of_wickets_for_innings_ids(session, innings_ids)
         all_partnerships = await ScorecardRepository.get_partnerships_for_innings_ids(session, innings_ids)
         all_over_aggs = await DeliveryRepository.get_over_aggregates_for_innings_ids(session, innings_ids)
+
+        # Selected squads for both teams — one query, used to build a "yet to bat" list per innings.
+        from src.database.postgres.schemas.match_squad_schema import MatchSquadSchema as _MSQ
+        squads_by_team = defaultdict(list)
+        _team_ids = [t for t in [match.team_a_id, match.team_b_id] if t]
+        if _team_ids:
+            sres = await session.execute(
+                select(_MSQ.team_id, _MSQ.player_id, _MSQ.batting_order)
+                .where(_MSQ.match_id == match_id, _MSQ.team_id.in_(_team_ids), _MSQ.is_playing == True)
+                .order_by(_MSQ.batting_order.asc())
+            )
+            for tid, pid, order in sres.all():
+                squads_by_team[tid].append((pid, order))
         over_series_by_inn = defaultdict(list)
         for row in all_over_aggs:
             over_series_by_inn[row.innings_id].append({
@@ -80,23 +95,47 @@ class ScorecardService:
         for p in all_partnerships:
             if p.player_a_id: all_player_ids.add(p.player_a_id)
             if p.player_b_id: all_player_ids.add(p.player_b_id)
+        for _tid, _entries in squads_by_team.items():
+            for pid, _ in _entries:
+                if pid: all_player_ids.add(pid)
         all_player_names = {}
         all_player_profiles = {}
+        all_player_roles = {}
+        # Captain / VC / WK flags are per-team — look up by (team_id, player_id).
+        team_player_flags = {}
         if all_player_ids:
             # LEFT JOIN users so a linked user's uploaded photo is used when the
             # player's own profile_image is blank. Covers the common case where
             # a real user registered and got mapped to a player record.
             profile_expr = func.coalesce(PlayerSchema.profile_image, UserSchema.profile).label("profile")
             pres = await session.execute(
-                select(PlayerSchema.id, PlayerSchema.full_name, profile_expr)
+                select(PlayerSchema.id, PlayerSchema.full_name, profile_expr, PlayerSchema.role)
                 .select_from(PlayerSchema)
                 .outerjoin(UserSchema, UserSchema.id == PlayerSchema.user_id)
                 .where(PlayerSchema.id.in_(all_player_ids))
             )
-            for pid, pname, profile in pres.all():
+            for pid, pname, profile, role in pres.all():
                 all_player_names[pid] = pname
                 if profile:
                     all_player_profiles[pid] = profile
+                if role:
+                    all_player_roles[pid] = role
+
+            # Captain / vice-captain / WK flags are stored per-team in team_players.
+            # Only look them up for the teams in this match (1 query, narrow window).
+            if _team_ids:
+                from src.database.postgres.schemas.team_player_schema import TeamPlayerSchema as _TP
+                tp_res = await session.execute(
+                    select(_TP.team_id, _TP.player_id, _TP.is_captain, _TP.is_vice_captain, _TP.is_wicket_keeper)
+                    .where(_TP.team_id.in_(_team_ids), _TP.player_id.in_(all_player_ids))
+                )
+                for tid_, pid_, cap, vc, wk in tp_res.all():
+                    if cap or vc or wk:
+                        team_player_flags[(tid_, pid_)] = {
+                            "is_captain": bool(cap),
+                            "is_vice_captain": bool(vc),
+                            "is_wicket_keeper": bool(wk),
+                        }
 
         for inn in innings_list:
             batting = batting_by_inn.get(inn.id, [])
@@ -107,6 +146,10 @@ class ScorecardService:
 
             batting_cards = []
             for b in batting:
+                # Captain / VC / WK badges follow the team a player plays for
+                # in THIS match, not their global roster — pull from the
+                # (batting_team_id, player_id) lookup we already built above.
+                bat_flags = team_player_flags.get((inn.batting_team_id, b.player_id), {})
                 batting_cards.append({
                     "player_id": b.player_id,
                     "player_name": player_names.get(b.player_id, ""),
@@ -119,10 +162,14 @@ class ScorecardService:
                     "strike_rate": b.strike_rate,
                     "how_out": b.how_out,
                     "is_out": b.is_out,
+                    "is_captain": bat_flags.get("is_captain", False),
+                    "is_vice_captain": bat_flags.get("is_vice_captain", False),
+                    "is_wicket_keeper": bat_flags.get("is_wicket_keeper", False),
                 })
 
             bowling_cards = []
             for b in bowling:
+                bowl_flags = team_player_flags.get((inn.bowling_team_id, b.player_id), {})
                 bowling_cards.append({
                     "player_id": b.player_id,
                     "player_name": player_names.get(b.player_id, ""),
@@ -135,6 +182,9 @@ class ScorecardService:
                     "wides": b.wides,
                     "no_balls": b.no_balls,
                     "dot_balls": b.dot_balls,
+                    "is_captain": bowl_flags.get("is_captain", False),
+                    "is_vice_captain": bowl_flags.get("is_vice_captain", False),
+                    "is_wicket_keeper": bowl_flags.get("is_wicket_keeper", False),
                 })
 
             fow_list = []
@@ -165,6 +215,22 @@ class ScorecardService:
                     "is_active": p.is_active,
                 })
 
+            batted_ids = {b.player_id for b in batting}
+            squad_entries = squads_by_team.get(inn.batting_team_id, [])
+            yet_to_bat = []
+            for pid, _order in squad_entries:
+                if pid and pid not in batted_ids:
+                    flags = team_player_flags.get((inn.batting_team_id, pid), {})
+                    yet_to_bat.append({
+                        "player_id": pid,
+                        "player_name": all_player_names.get(pid, ""),
+                        "profile": all_player_profiles.get(pid),
+                        "role": all_player_roles.get(pid),
+                        "is_captain": flags.get("is_captain", False),
+                        "is_vice_captain": flags.get("is_vice_captain", False),
+                        "is_wicket_keeper": flags.get("is_wicket_keeper", False),
+                    })
+
             result["innings"].append({
                 "innings_number": inn.innings_number,
                 "batting_team_id": inn.batting_team_id,
@@ -181,8 +247,24 @@ class ScorecardService:
                 "bowling": bowling_cards,
                 "fall_of_wickets": fow_list,
                 "partnerships": partnership_list,
+                "yet_to_bat": yet_to_bat,
                 "over_series": over_series_by_inn.get(inn.id, []),
             })
+
+        for tid, entries in squads_by_team.items():
+            result["team_squads"][str(tid)] = [
+                {
+                    "player_id": pid,
+                    "player_name": all_player_names.get(pid, ""),
+                    "profile": all_player_profiles.get(pid),
+                    "role": all_player_roles.get(pid),
+                    "batting_order": order,
+                    "is_captain": team_player_flags.get((tid, pid), {}).get("is_captain", False),
+                    "is_vice_captain": team_player_flags.get((tid, pid), {}).get("is_vice_captain", False),
+                    "is_wicket_keeper": team_player_flags.get((tid, pid), {}).get("is_wicket_keeper", False),
+                }
+                for pid, order in entries if pid
+            ]
 
         if match.status == "completed" and result["innings"]:
             result["top_performers"] = ScorecardService._compute_top_performers(result["innings"])

@@ -318,8 +318,8 @@ class TournamentStageService:
                 "team_name": team.name,
                 "short_name": team.short_name,
                 "played": 0, "won": 0, "lost": 0, "drawn": 0, "points": 0,
-                "runs_scored": 0, "overs_faced": 0.0,
-                "runs_conceded": 0, "overs_bowled": 0.0,
+                "runs_scored": 0, "balls_faced": 0,
+                "runs_conceded": 0, "balls_bowled": 0,
                 "nrr": 0.0,
                 "qualification_status": gt.qualification_status,
             }
@@ -400,20 +400,24 @@ class TournamentStageService:
             if rt in ('walkover', 'forfeit', 'awarded'):
                 continue
 
+            from src.services.cricket_rules import overs_to_balls
             for inn in innings_by_match.get(match.id, []):
                 bat, bowl = inn.batting_team_id, inn.bowling_team_id
+                inn_balls = overs_to_balls(inn.total_overs)
                 if bat in standings:
                     standings[bat]["runs_scored"] += inn.total_runs or 0
-                    standings[bat]["overs_faced"] += inn.total_overs or 0.0
+                    standings[bat]["balls_faced"] += inn_balls
                 if bowl in standings:
                     standings[bowl]["runs_conceded"] += inn.total_runs or 0
-                    standings[bowl]["overs_bowled"] += inn.total_overs or 0.0
+                    standings[bowl]["balls_bowled"] += inn_balls
 
-        # Calculate NRR
+        # NRR with ball-accurate denominators so the points/NRR tiebreaker is exact.
+        from src.services.cricket_rules import nrr_for_team
         for s in standings.values():
-            rr_for = (s["runs_scored"] / s["overs_faced"]) if s["overs_faced"] > 0 else 0
-            rr_against = (s["runs_conceded"] / s["overs_bowled"]) if s["overs_bowled"] > 0 else 0
-            s["nrr"] = round(rr_for - rr_against, 3)
+            s["nrr"] = nrr_for_team(
+                s["balls_faced"], s["runs_scored"],
+                s["balls_bowled"], s["runs_conceded"],
+            )
 
         sorted_standings = sorted(
             standings.values(),
@@ -423,7 +427,7 @@ class TournamentStageService:
 
         # Remove intermediate fields
         for s in sorted_standings:
-            for k in ("runs_scored", "overs_faced", "runs_conceded", "overs_bowled"):
+            for k in ("runs_scored", "balls_faced", "runs_conceded", "balls_bowled"):
                 del s[k]
 
         return {
@@ -434,17 +438,136 @@ class TournamentStageService:
 
     @staticmethod
     async def get_stage_standings(session, stage_id):
-        """Get standings for all groups in a stage."""
         groups = await TournamentStageRepository.get_groups(session, stage_id)
+        if not groups:
+            return []
+        group_ids = [g.id for g in groups]
+
+        teams_by_group = await TournamentStageRepository.get_group_teams_for_groups(session, group_ids)
+
+        matches_res = await session.execute(
+            select(MatchSchema).options(load_only(
+                MatchSchema.id, MatchSchema.status, MatchSchema.team_a_id,
+                MatchSchema.team_b_id, MatchSchema.winner_id, MatchSchema.result_type,
+                MatchSchema.tournament_id, MatchSchema.group_id,
+            )).where(MatchSchema.group_id.in_(group_ids))
+        )
+        matches_by_group = {}
+        tournament_id = None
+        for m in matches_res.scalars().all():
+            matches_by_group.setdefault(m.group_id, []).append(m)
+            if not tournament_id:
+                tournament_id = m.tournament_id
+
+        completed_match_ids = [
+            m.id for ms in matches_by_group.values() for m in ms if m.status == "completed"
+        ]
+        innings_by_match = {}
+        if completed_match_ids:
+            inn_res = await session.execute(
+                select(InningsSchema).where(InningsSchema.match_id.in_(completed_match_ids))
+            )
+            for inn in inn_res.scalars().all():
+                innings_by_match.setdefault(inn.match_id, []).append(inn)
+
+        pts_win, pts_draw, pts_nr = 2, 1, 0
+        if tournament_id:
+            try:
+                tourn = await TournamentRepository.get_by_id(session, tournament_id)
+                if tourn:
+                    pts_win = getattr(tourn, 'points_per_win', None) or 2
+                    pts_draw = getattr(tourn, 'points_per_draw', None) or 1
+                    pts_nr = getattr(tourn, 'points_per_no_result', None) or 0
+            except Exception as e:
+                logger.warning(f"Failed to load tournament points config: {e}")
+
+        from src.services.cricket_rules import overs_to_balls, nrr_for_team
+
         result = []
         for group in groups:
-            group_data = await TournamentStageService.get_group_standings(session, group.id)
+            team_rows = teams_by_group.get(group.id, [])
+            group_matches = matches_by_group.get(group.id, [])
+            total_matches = len(group_matches)
+            completed_matches = sum(1 for m in group_matches if m.status == "completed")
+
+            if not team_rows:
+                result.append({
+                    "group_id": group.id, "group_name": group.group_name,
+                    "standings": [], "total_matches": total_matches,
+                    "completed_matches": completed_matches,
+                })
+                continue
+
+            standings = {}
+            for team, gt in team_rows:
+                standings[team.id] = {
+                    "team_id": team.id, "team_name": team.name, "short_name": team.short_name,
+                    "played": 0, "won": 0, "lost": 0, "drawn": 0, "points": 0,
+                    "runs_scored": 0, "balls_faced": 0,
+                    "runs_conceded": 0, "balls_bowled": 0,
+                    "nrr": 0.0, "qualification_status": gt.qualification_status,
+                }
+
+            for match in group_matches:
+                if match.status != "completed":
+                    continue
+                ta, tb = match.team_a_id, match.team_b_id
+                if ta not in standings or tb not in standings:
+                    continue
+                rt = getattr(match, 'result_type', None) or 'normal'
+                if rt in ('no_result', 'abandoned'):
+                    standings[ta]["played"] += 1
+                    standings[tb]["played"] += 1
+                    standings[ta]["no_result"] = standings[ta].get("no_result", 0) + 1
+                    standings[tb]["no_result"] = standings[tb].get("no_result", 0) + 1
+                    standings[ta]["points"] += pts_nr
+                    standings[tb]["points"] += pts_nr
+                    continue
+                standings[ta]["played"] += 1
+                standings[tb]["played"] += 1
+                if match.winner_id:
+                    if match.winner_id == ta:
+                        standings[ta]["won"] += 1; standings[ta]["points"] += pts_win
+                        standings[tb]["lost"] += 1
+                    elif match.winner_id == tb:
+                        standings[tb]["won"] += 1; standings[tb]["points"] += pts_win
+                        standings[ta]["lost"] += 1
+                else:
+                    standings[ta]["drawn"] += 1; standings[tb]["drawn"] += 1
+                    standings[ta]["points"] += pts_draw
+                    standings[tb]["points"] += pts_draw
+                if rt in ('walkover', 'forfeit', 'awarded'):
+                    continue
+                for inn in innings_by_match.get(match.id, []):
+                    bat, bowl = inn.batting_team_id, inn.bowling_team_id
+                    inn_balls = overs_to_balls(inn.total_overs)
+                    if bat in standings:
+                        standings[bat]["runs_scored"] += inn.total_runs or 0
+                        standings[bat]["balls_faced"] += inn_balls
+                    if bowl in standings:
+                        standings[bowl]["runs_conceded"] += inn.total_runs or 0
+                        standings[bowl]["balls_bowled"] += inn_balls
+
+            for s in standings.values():
+                s["nrr"] = nrr_for_team(
+                    s["balls_faced"], s["runs_scored"],
+                    s["balls_bowled"], s["runs_conceded"],
+                )
+            sorted_standings = sorted(
+                standings.values(),
+                key=lambda x: (x["points"], x["nrr"]),
+                reverse=True,
+            )
+            for s in sorted_standings:
+                for k in ("runs_scored", "balls_faced", "runs_conceded", "balls_bowled"):
+                    del s[k]
+
             result.append({
                 "group_id": group.id,
                 "group_name": group.group_name,
-                "standings": group_data["standings"],
-                "total_matches": group_data["total_matches"],
-                "completed_matches": group_data["completed_matches"],
+                "standings": sorted_standings,
+                "total_matches": total_matches,
+                "completed_matches": completed_matches,
             })
         return result
 
@@ -625,14 +748,40 @@ class TournamentStageService:
             await session.commit()
             return
 
-        # Stage is complete - update stage status
+        # Stage is complete — persist the status update FIRST, in its own commit,
+        # so that even if the downstream qualification or next-stage generation
+        # explodes, the stage stays "completed" and the user can trigger the
+        # next stage manually via the UI "Create Next Stage" button. Pre-fix,
+        # any failure below silently rolled back this update too.
         await TournamentStageRepository.update_stage(session, stage.id, {"status": "completed"})
-
-        # Auto-complete tournament ONLY when a "final" stage completes
         if stage.stage_name == "final":
             await TournamentRepository.update(session, tournament_id, {"status": "completed"})
+        await session.commit()
 
-        # Get qualification rule
+        # ── Best-effort: compute qualifications + auto-generate next stage. ──
+        # Any failure here is recoverable from the UI ("Create Next Stage"),
+        # so we MUST NOT let it roll back the stage-completed status above.
+        try:
+            await TournamentStageService._progress_after_stage_completion(
+                session, stage, tournament_id, stage_matches,
+            )
+        except Exception as e:
+            logger.error(
+                f"Next-stage progression failed (stage_id={stage.id}, stage_name={stage.stage_name}): {e}. "
+                f"Stage stays marked completed; user can trigger next stage from the UI."
+            )
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+        return
+
+    @staticmethod
+    async def _progress_after_stage_completion(session, stage, tournament_id, stage_matches):
+        """Extracted body of the original on_match_completed post-completion logic.
+        Lives here so the caller can wrap it in a try/except — see on_match_completed."""
+
+        tournament = None  # lazily loaded only if the knockout branch needs it
         rule = stage.qualification_rule or {}
         top_n = rule.get("top_n", 2)
 

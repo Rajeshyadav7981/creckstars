@@ -294,9 +294,9 @@ async def set_squad(
 ):
     players = [{"player_id": p.player_id, "batting_order": p.batting_order} for p in req.players]
     await MatchService.set_squad(session, match_id, req.team_id, players, user_id=user.id)
-    # Drop the cached squad row so the next GET reflects the new selection.
     from src.utils.cache import invalidate as _invalidate_cache
     await _invalidate_cache(f"squad:{match_id}:{req.team_id}")
+    await MatchCache.invalidate_match(match_id)
 
     # Invalidate stats cache for all users whose players were added to the squad
     from src.app.api.routers.user_router import invalidate_user_stats

@@ -514,7 +514,7 @@ body{{font-family:'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',R
       <div class="f">
         <div class="ic">&#128202;</div>
         <div class="t">Full Scorecards</div>
-        <div class="d">Batting card, bowling figures, fall of wickets, partnerships, manhattan and worm graphs &mdash; the whole match, saved.</div>
+        <div class="d">Batting card, bowling figures, fall of wickets, partnerships and per-over runs graph &mdash; the whole match, saved.</div>
       </div>
       <div class="f">
         <div class="ic">&#127942;</div>

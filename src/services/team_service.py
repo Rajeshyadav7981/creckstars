@@ -60,10 +60,37 @@ class TeamService:
         )
 
     @staticmethod
+    async def update_team(session: AsyncSession, team_id: int, updates: dict, user_id: int):
+        team = await TeamRepository.get_by_id(session, team_id)
+        if not team:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+        TeamService._check_owner(team, user_id)
+        clean = {k: v for k, v in updates.items() if v is not None}
+        if not clean:
+            return team
+        return await TeamRepository.update(session, team_id, clean)
+
+    @staticmethod
     async def get_team_detail(session: AsyncSession, team_id: int):
         team = await TeamRepository.get_by_id(session, team_id)
         if not team:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+        from sqlalchemy import select, or_, and_, func, case, Integer
+        from src.database.postgres.schemas.match_schema import MatchSchema as _M
+        stats_row = (await session.execute(
+            select(
+                func.count(_M.id).label("played"),
+                func.coalesce(func.sum(case((_M.winner_id == team_id, 1), else_=0)), 0).label("wins"),
+            ).where(
+                and_(
+                    _M.status == "completed",
+                    or_(_M.team_a_id == team_id, _M.team_b_id == team_id),
+                )
+            )
+        )).first()
+        matches_played = int(stats_row.played or 0) if stats_row else 0
+        wins = int(stats_row.wins or 0) if stats_row else 0
+        losses = max(0, matches_played - wins)
         rows = await TeamRepository.get_team_players(session, team_id)
         players = []
         for player, tp in rows:
@@ -88,7 +115,13 @@ class TeamService:
                 "logo_url": team.logo_url,
                 "color": team.color,
                 "home_ground": team.home_ground,
+                "city": team.city,
+                "latitude": team.latitude,
+                "longitude": team.longitude,
                 "created_by": team.created_by,
+                "matches_played": matches_played,
+                "wins": wins,
+                "losses": losses,
             },
             "players": players,
         }

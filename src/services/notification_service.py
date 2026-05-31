@@ -157,11 +157,12 @@ class NotificationService:
                     "JOIN players p ON p.id = ms.player_id "
                     "WHERE ms.match_id = :mid AND p.user_id IS NOT NULL"
                 ), {"mid": match_id})
-                for r in result.all():
+                rows = [{"uid": r[0], "mid": match_id} for r in result.all()]
+                if rows:
                     await session.execute(text(
                         "INSERT INTO match_subscriptions (user_id, match_id) "
                         "VALUES (:uid, :mid) ON CONFLICT (user_id, match_id) DO NOTHING"
-                    ), {"uid": r[0], "mid": match_id})
+                    ), rows)
 
                 await session.commit()
         except Exception as e:
