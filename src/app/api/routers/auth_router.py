@@ -321,6 +321,34 @@ async def _otp_clear_verified(mobile: str, purpose: str):
         return
 
 
+async def _try_reuse_active_vid(mobile: str, purpose: str) -> int | None:
+    from src.database.redis.redis_client import redis_client
+    from src.services.verifynow_service import _vid_key
+    try:
+        r = await redis_client.get_client()
+        if not r:
+            return None
+        target_key = _vid_key(mobile, purpose)
+        existing = await r.get(target_key)
+        if existing:
+            ttl = await r.ttl(target_key)
+            if ttl > 0:
+                return ttl
+        async for key in r.scan_iter(match=f"verifynow:vid:{mobile}:*", count=20):
+            if isinstance(key, bytes):
+                key = key.decode()
+            if key == target_key:
+                continue
+            existing_vid = await r.get(key)
+            existing_ttl = await r.ttl(key)
+            if existing_vid and existing_ttl > 0:
+                await r.set(target_key, existing_vid, ex=max(existing_ttl, 30))
+                return existing_ttl
+    except Exception:
+        return None
+    return None
+
+
 @router.post("/send-otp")
 @limiter.limit(RATE_LIMITS["send_otp"])
 async def send_otp(
@@ -338,24 +366,34 @@ async def send_otp(
     mobile = data.mobile.strip()
     if len(mobile) != 10 or not mobile.isdigit():
         raise HTTPException(status_code=400, detail="Invalid mobile number")
+    if mobile[0] not in "6789":
+        raise HTTPException(status_code=400, detail="Mobile number must start with 6, 7, 8 or 9")
 
-    # Don't let a locked-out account re-arm itself by requesting a new OTP.
     await _otp_lockout_check(mobile, data.purpose)
 
-    # For password reset, the mobile must already be registered.
-    if data.purpose == "reset_password":
+    if data.purpose in ("reset_password", "login"):
         existing = await UserRepository.get_by_mobile(session, mobile)
         if not existing:
             raise HTTPException(status_code=404, detail="No account found with this mobile number")
+    elif data.purpose == "register":
+        existing = await UserRepository.get_by_mobile(session, mobile)
+        if existing and not getattr(existing, "is_guest", False):
+            raise HTTPException(status_code=409, detail="An account with this mobile already exists. Please log in instead.")
 
     try:
         _vid, timeout = await VerifyNowService.send(mobile, data.purpose)
     except VerifyNowError as e:
         if getattr(e, "response_code", None) == "506":
-            # An OTP is still active for this number on VerifyNow's side.
+            reused = await _try_reuse_active_vid(mobile, data.purpose)
+            if reused:
+                logger.info(
+                    "OTP reused active VerifyNow code for new purpose",
+                    extra={"extra_data": {"mobile": _mask_mobile(mobile), "purpose": data.purpose, "expires_in": reused}},
+                )
+                return {"message": "Use the code already sent to your mobile.", "expires_in": reused, "reused": True}
             raise HTTPException(
                 status_code=429,
-                detail="A code was already sent. Please wait for it to expire before requesting a new one.",
+                detail="A code was already sent. Please wait about a minute before requesting a new one.",
             )
         logger.error(
             "VerifyNow send failed",
@@ -373,8 +411,7 @@ async def send_otp(
         "OTP dispatched (VerifyNow)",
         extra={"extra_data": {"mobile": _mask_mobile(mobile), "purpose": data.purpose, "expires_in": timeout}},
     )
-    # Hand the UI VerifyNow's real validity window so the countdown is accurate.
-    return {"message": "OTP sent", "expires_in": timeout}
+    return {"message": "OTP sent", "expires_in": timeout, "reused": False}
 
 
 @router.post("/verify-otp")

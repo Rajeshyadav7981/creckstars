@@ -8,6 +8,7 @@ from src.utils.security import hash_password
 
 MOBILE = "7981212220"
 PASSWORD = "Rajesh@123"
+
 BASE = "http://localhost:7981"
 
 
