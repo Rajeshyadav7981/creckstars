@@ -7,7 +7,9 @@
 #   ./scripts/migrate.sh --sql      # print the SQL that WOULD run, apply nothing
 set -euo pipefail
 
-PROJECT_ROOT="${PROJECT_ROOT:-/home/ry128037/creckstars}"
+# Default to the repo root inferred from this script's location, so it works on
+# any VM/user without editing. Override with PROJECT_ROOT=... if needed.
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 ALEMBIC="${PROJECT_ROOT}/venv/bin/alembic"
 cd "$PROJECT_ROOT"
 

@@ -4,7 +4,9 @@
 # -> auto-rollback to the previous commit if /health fails.
 set -euo pipefail
 
-PROJECT_ROOT="${PROJECT_ROOT:-/home/ry128037/creckstars}"
+# Default to the repo root inferred from this script's location, so it works on
+# any VM/user without editing. Override with PROJECT_ROOT=... if needed.
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 BRANCH="${DEPLOY_BRANCH:-main}"
 HEALTH_URL="${HEALTH_URL:-http://localhost:7981/health}"
 VENV="${PROJECT_ROOT}/venv"

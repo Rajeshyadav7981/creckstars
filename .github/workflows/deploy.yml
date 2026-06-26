@@ -30,7 +30,7 @@ jobs:
           script_stop: true
           command_timeout: 10m
           script: |
-            cd /home/ry128037/creckstars
+            cd ~/creckstars
             bash scripts/deploy.sh
 
       - name: Verify public health endpoint

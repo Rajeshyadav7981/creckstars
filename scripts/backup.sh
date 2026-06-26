@@ -9,8 +9,8 @@
 set -euo pipefail
 
 # ---- config (override via env) ------------------------------------------------
-PROJECT_ROOT="${PROJECT_ROOT:-/home/ry128037/creckstars}"
-BACKUP_DIR="${BACKUP_DIR:-/home/ry128037/backups}"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+BACKUP_DIR="${BACKUP_DIR:-$(dirname "$PROJECT_ROOT")/backups}"
 DB_NAME="${DB_NAME:-creckstars}"
 DB_USER="${DB_USER:-creckstars}"
 DB_HOST="${DB_HOST:-localhost}"
@@ -58,7 +58,9 @@ EOF
 # 5. Offsite copy to GCS (VM's service account needs objectAdmin on the bucket).
 if [ -n "$GCS_BUCKET" ] && command -v gcloud >/dev/null 2>&1; then
   log "uploading to ${GCS_BUCKET}/${STAMP}/ ..."
-  gcloud storage cp -r "$DEST" "${GCS_BUCKET}/${STAMP}/" --quiet
+  # Non-fatal: a missing/unconfigured bucket must not abort a deploy (the local
+  # snapshot is still the rollback net). Configure GCS later per CICD.md.
+  gcloud storage cp -r "$DEST" "${GCS_BUCKET}/${STAMP}/" --quiet || log "GCS upload failed (non-fatal) — local backup kept"
 else
   log "GCS upload skipped (bucket unset or gcloud missing)"
 fi
