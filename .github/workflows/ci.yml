@@ -1,0 +1,68 @@
+name: CI
+
+# Gate every push & PR: install, spin up Postgres + Redis, run the test suite.
+# Deploy (deploy.yml) only runs after this passes on main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: creckstars
+          POSTGRES_PASSWORD: creckstars
+          POSTGRES_DB: creckstars
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U creckstars"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_USER: creckstars
+      DB_PASSWORD: creckstars
+      DB_NAME: creckstars
+      REDIS_URL: redis://localhost:6379/0
+      ENVIRONMENT: test
+      SECRET_KEY: ci-test-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Install superuser-only extensions
+        run: |
+          PGPASSWORD=creckstars psql -h localhost -U creckstars -d creckstars \
+            -c "CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS cube; CREATE EXTENSION IF NOT EXISTS earthdistance;"
+
+      - name: Load schema + migrate
+        # Gate the rebuild path: a broken schema.sql or migration must fail CI
+        # here rather than surfacing on the VM. Mirrors the stamp-free fresh
+        # build (load baseline, then upgrade head).
+        run: |
+          PGPASSWORD=creckstars psql -h localhost -U creckstars -d creckstars -v ON_ERROR_STOP=1 -f schema.sql
+          alembic upgrade head
+
+      - name: Run tests
+        run: pytest -q

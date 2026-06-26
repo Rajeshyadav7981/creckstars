@@ -1,7 +1,23 @@
-from sqlalchemy import select, or_, case, func
+from sqlalchemy import select, or_, case, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 from src.database.postgres.schemas.user_schema import UserSchema
+
+
+# Statements that purge a user's private engagement data. Authored content
+# (posts/comments/polls/matches/tournaments) is intentionally left in place and
+# de-identified via the anonymized user row — deleting it would cascade into
+# other users' replies and corrupt match scorecards.
+_DELETE_PERSONAL_DATA = (
+    "DELETE FROM push_tokens WHERE user_id = :uid",
+    "DELETE FROM match_subscriptions WHERE user_id = :uid",
+    "DELETE FROM user_favorite_matches WHERE user_id = :uid",
+    "DELETE FROM user_favorite_tournaments WHERE user_id = :uid",
+    "DELETE FROM post_likes WHERE user_id = :uid",
+    "DELETE FROM comment_likes WHERE user_id = :uid",
+    "DELETE FROM poll_votes WHERE user_id = :uid",
+    "DELETE FROM mentions WHERE mentioned_user_id = :uid OR mentioner_user_id = :uid",
+)
 
 
 class UserRepository:
@@ -101,3 +117,58 @@ class UserRepository:
             q = q.order_by(UserSchema.full_name)
         result = await session.execute(q.limit(limit))
         return list(result.all())
+
+    @staticmethod
+    async def delete_account(session: AsyncSession, user_id: int) -> bool:
+        """Permanently delete a user's account for Play Store compliance.
+
+        Purges private engagement data, decrements follower/following counts on
+        the counterparties, unlinks any cricket player profile, then anonymizes
+        the user row in place (NOT NULL created_by references elsewhere prevent a
+        hard row delete). The original mobile/email/username are freed so the
+        number can be re-registered, and the password is scrubbed so login is
+        impossible. Runs as a single transaction.
+        """
+        user = await UserRepository.get_by_id(session, user_id)
+        if not user:
+            return False
+
+        params = {"uid": user_id}
+
+        # Keep denormalized follow counts correct on the people this user was
+        # connected to, before the follow rows are removed.
+        await session.execute(text(
+            "UPDATE users SET following_count = GREATEST(following_count - 1, 0) "
+            "WHERE id IN (SELECT follower_id FROM user_follows WHERE following_id = :uid)"
+        ), params)
+        await session.execute(text(
+            "UPDATE users SET followers_count = GREATEST(followers_count - 1, 0) "
+            "WHERE id IN (SELECT following_id FROM user_follows WHERE follower_id = :uid)"
+        ), params)
+        await session.execute(text(
+            "DELETE FROM user_follows WHERE follower_id = :uid OR following_id = :uid"
+        ), params)
+
+        for stmt in _DELETE_PERSONAL_DATA:
+            await session.execute(text(stmt), params)
+
+        # Unlink the cricket profile but keep the player row so historical
+        # scorecards stay intact.
+        await session.execute(text(
+            "UPDATE players SET user_id = NULL WHERE user_id = :uid"
+        ), params)
+
+        # Anonymize the account in place and free the unique identifiers.
+        await session.execute(text(
+            "UPDATE users SET "
+            "first_name = 'Deleted', last_name = 'User', full_name = 'Deleted User', "
+            "mobile = 'del_' || id, email = NULL, username = NULL, "
+            "password = 'account_deleted', profile = NULL, bio = NULL, "
+            "city = NULL, state_province = NULL, country = NULL, "
+            "date_of_birth = NULL, batting_style = NULL, bowling_style = NULL, "
+            "player_role = NULL, followers_count = 0, following_count = 0 "
+            "WHERE id = :uid"
+        ), params)
+
+        await session.commit()
+        return True

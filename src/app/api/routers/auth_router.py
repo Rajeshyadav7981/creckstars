@@ -128,6 +128,20 @@ async def update_me(
     )
 
 
+@router.delete("/me", status_code=204)
+async def delete_me(
+    current_user=Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_db),
+):
+    """Permanently delete the current user's account and personal data.
+
+    Required by Google Play's account-deletion policy. Purges private data,
+    de-identifies the account, and frees the mobile number for re-registration.
+    """
+    await AuthService.delete_account(session=session, user_id=current_user.id)
+    return None
+
+
 @router.post("/me/upload-photo")
 async def upload_profile_photo(
     file: UploadFile = File(...),
@@ -173,10 +187,14 @@ async def upload_profile_photo(
 
     # Save file — filename is server-generated only; no user input on disk.
     # Persist to local disk via the shared storage helper; returns '/uploads/...'.
-    from src.services.storage_service import save_image
+    from src.services.storage_service import save_image, delete_image
+    old_profile_url = getattr(current_user, "profile", None)
     filename = f"{current_user.id}_{uuid.uuid4().hex}.jpg"
     profile_url = await save_image(content, "profiles", filename)
     await UserRepository.update_user(session, current_user.id, {"profile": profile_url})
+    # Reclaim disk: drop the previous avatar now that the new one is committed.
+    if old_profile_url and old_profile_url != profile_url:
+        await delete_image(old_profile_url)
 
     try:
         from src.database.redis.redis_client import redis_client

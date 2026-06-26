@@ -15,7 +15,9 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column("matches", sa.Column("name", sa.String(length=200), nullable=True))
+    # Idempotent ALTER so a fresh build (psql -f schema.sql && alembic upgrade
+    # head) stays stamp-free even if this column is later folded into the baseline.
+    op.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS name VARCHAR(200)")
 
 
 def downgrade():

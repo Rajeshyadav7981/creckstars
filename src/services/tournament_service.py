@@ -132,6 +132,18 @@ class TournamentService:
 
     @staticmethod
     async def get_standings(session: AsyncSession, tournament_id: int):
+        # Points tables tolerate brief staleness; cache the expensive
+        # matches+innings aggregation for 30s to absorb refresh storms when a
+        # popular tournament's table is open on many devices.
+        from src.utils.cache import cached
+        return await cached(
+            f"tournament:standings:{tournament_id}",
+            ttl=30,
+            fetcher=lambda: TournamentService._compute_standings(session, tournament_id),
+        )
+
+    @staticmethod
+    async def _compute_standings(session: AsyncSession, tournament_id: int):
         tournament = await TournamentRepository.get_by_id(session, tournament_id)
         if not tournament:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tournament not found")

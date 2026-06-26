@@ -15,9 +15,13 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "tournament_stages",
-        sa.Column("stage_label", sa.String(length=80), nullable=True),
+    # IF NOT EXISTS: this column is also present in the frozen baseline snapshot
+    # (schema.sql), so on a fresh build the column already exists when this
+    # delta runs. Idempotent ALTER lets `psql -f schema.sql && alembic upgrade
+    # head` succeed with no manual stamping.
+    op.execute(
+        "ALTER TABLE tournament_stages "
+        "ADD COLUMN IF NOT EXISTS stage_label VARCHAR(80)"
     )
 
 

@@ -1,0 +1,39 @@
+# CrecKStars API — canonical systemd unit.
+# Install:  sudo cp scripts/creckstars.service /etc/systemd/system/creckstars.service
+#           sudo systemctl daemon-reload && sudo systemctl restart creckstars
+#
+# Key difference vs the old unit: ExecStartPre runs migrations BEFORE uvicorn
+# starts. If a migration fails, the service refuses to start (fail fast — never
+# serve against a half-migrated schema). Migrations run once here, not per worker.
+[Unit]
+Description=CrecKStars API
+After=network-online.target postgresql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ry128037
+WorkingDirectory=/home/ry128037/creckstars
+EnvironmentFile=/home/ry128037/creckstars/.env
+Environment=PATH=/home/ry128037/creckstars/venv/bin:/usr/bin:/bin
+
+# Migrate schema to head before booting the app (idempotent; no-op if current).
+ExecStartPre=/home/ry128037/creckstars/scripts/migrate.sh
+
+# 2 workers: one slow/sync call no longer blocks every in-flight request, and
+# we use both cores on the VM. Safe across workers — WS broadcast goes via Redis
+# pub/sub and push-notification dispatch is deduped with a per-event SET NX claim
+# (see notification_service.py) so users never get duplicate pushes. If you scale
+# workers further, also bump DB_POOL_SIZE (pool is per-worker).
+ExecStart=/home/ry128037/creckstars/venv/bin/uvicorn src.app.api.fastapi_app:app --host 0.0.0.0 --port 7981 --workers 2
+
+# Graceful reload/stop — the app's lifespan drains in-flight work on SIGTERM.
+# 45s (not 30) so the 10s background-task drain plus WS/Redis/DB cleanup always
+# finishes before systemd escalates to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 """Notification Service — Expo Push Notifications via Observer pattern."""
 import json
 import asyncio
+import hashlib
 import httpx
 from sqlalchemy import text
 from src.database.postgres.db import db
@@ -252,6 +253,24 @@ class NotificationWorker:
                             continue
                         if event_type not in ("delivery", "innings_end", "match_end"):
                             continue
+
+                        # Cross-worker dedup: this is a fan-out psubscribe, so
+                        # every uvicorn worker's listener receives this same
+                        # message. Claim the event via SET NX so exactly one
+                        # worker dispatches the push — otherwise users get a
+                        # duplicate notification per running worker.
+                        dedup_key = (
+                            f"notif:sent:{match_id}:"
+                            f"{hashlib.sha1(data.encode()).hexdigest()[:16]}"
+                        )
+                        try:
+                            claimed = await r.set(dedup_key, "1", nx=True, ex=60)
+                            if not claimed:
+                                continue
+                        except Exception:
+                            # If Redis hiccups, fall through and dispatch rather
+                            # than silently drop the notification.
+                            pass
 
                         # Fire-and-forget — don't block the listener
                         asyncio.create_task(

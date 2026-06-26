@@ -15,9 +15,11 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column(
-        "innings",
-        sa.Column("declared", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+    # Idempotent ALTER so a fresh build (psql -f schema.sql && alembic upgrade
+    # head) stays stamp-free even if this column is later folded into the baseline.
+    op.execute(
+        "ALTER TABLE innings "
+        "ADD COLUMN IF NOT EXISTS declared BOOLEAN NOT NULL DEFAULT false"
     )
 
 

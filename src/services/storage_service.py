@@ -24,3 +24,24 @@ async def save_image(content: bytes, subdir: str, filename: str,
         raise ValueError("Invalid upload path")
     await asyncio.to_thread(_blocking_write, path, content)
     return f"/uploads/{subdir}/{filename}"
+
+
+def _blocking_unlink(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+async def delete_image(url: str | None) -> None:
+    """Delete a locally-stored image given its '/uploads/...' URL.
+
+    No-op for empty values or external URLs (http...). Path-traversal safe.
+    """
+    if not url or not url.startswith("/uploads/"):
+        return
+    rel = url[len("/uploads/"):]
+    path = os.path.join(UPLOADS_DIR, rel)
+    if not os.path.realpath(path).startswith(os.path.realpath(UPLOADS_DIR) + os.sep):
+        return
+    await asyncio.to_thread(_blocking_unlink, path)

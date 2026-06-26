@@ -1,0 +1,15 @@
+# Install on the VM: /etc/systemd/system/creckstars-backup.service
+# Paired with creckstars-backup.timer. Runs the nightly DB + uploads backup.
+[Unit]
+Description=CrecKStars nightly backup (DB + uploads -> local + GCS)
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=ry128037
+WorkingDirectory=/home/ry128037/creckstars
+# Keep secrets out of the unit — read them from the app .env at runtime.
+EnvironmentFile=/home/ry128037/creckstars/.env
+Environment=GCS_BUCKET=gs://creckstars-backups
+Environment=RETENTION_DAYS=14
+ExecStart=/home/ry128037/creckstars/scripts/backup.sh

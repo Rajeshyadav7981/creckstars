@@ -246,6 +246,46 @@ class AuthService:
         return user
 
     @staticmethod
+    async def delete_account(session: AsyncSession, user_id: int) -> None:
+        """Delete the current user's account and purge their personal data."""
+        user = await UserRepository.get_by_id(session, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+        username = user.username
+
+        from sqlalchemy import select as _select
+        from src.database.postgres.schemas.player_schema import PlayerSchema as _PS
+        pres = await session.execute(_select(_PS.id).where(_PS.user_id == user_id))
+        player_ids = [pid for (pid,) in pres.all()]
+
+        deleted = await UserRepository.delete_account(session, user_id)
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+
+        try:
+            from src.database.redis.redis_client import redis_client
+            r = await redis_client.get_client()
+            if r:
+                keys = [f"user:{user_id}"]
+                if username:
+                    keys.append(f"profile:{username.lower()}")
+                for pid in player_ids:
+                    keys.append(f"cache:player_stats:{pid}")
+                await r.delete(*keys)
+                async for k in r.scan_iter(match="usearch:v2:*", count=200):
+                    await r.delete(k)
+                async for k in r.scan_iter(match="mention:*", count=200):
+                    await r.delete(k)
+        except Exception:
+            pass
+
+    @staticmethod
     async def login(
         session: AsyncSession,
         mobile: str,
